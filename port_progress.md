@@ -35,9 +35,10 @@
 - [x] **Mapeo Inicial de Memoria (Relocalización):** Preparada la estructura en memoria (`so_relocate`, `so_resolve`) y forzada la resolución de `__android_log_print` hacia la pantalla de depuración (`psvDebugScreenPrintf`) para atrapar los logs del motor.
 - [x] **Símbolos restantes:** Creado el archivo `dynlib.c` y poblado el array `default_dynlib` con todas las dependencias vitales de libc (malloc, free, time, math, sockets) y las variantes de GLES 1 (como un wrapper para `glClearColorx` apuntando a las funciones estándar de `vitaGL`).
 
-## Fase 4: Implementación de Falso JNI (FakeJNI) (Completada)
+## Fase 4: Implementación de Falso JNI (FakeJNI) (En Progreso)
 - [x] **Enlazado de Símbolos:** Se configuraron punteros a funciones en `main.c` para extraer dinámicamente `JNI_OnLoad`, `NativeInit`, `NativeRender` y `NativeResize` usando la macro `so_symbol`.
 - [x] **Secuencia de Arranque (Android Lifecycle):** Se crearon punteros ficticios para el Entorno Java (`fake_vm` y `fake_env`) y se enviaron como parámetros para sortear los controles del juego y ejecutar el constructor gráfico `NativeInit`.
+- [x] **Traducción JNI Crítica:** Se implementaron los métodos `GetStaticMethodID`, `CallStaticObjectMethodV`, y `NewStringUTF` para interceptar la lectura de assets (`readAssets`). Ahora el motor recibe directamente punteros de memoria locales con los binarios del juego cargados por el propio loader.
 - [x] **vitaGL & Main Loop:** Se inicializó el contexto de OpenGL (`vglInitExtended`) con la resolución nativa de Vita (960x544) y se construyó el bucle infinito (`while(1)`) que ejecuta `NativeRender` por cada fotograma e intercambia los buffers (`vglSwapBuffers`). Se añadió una salida de emergencia presionando el botón `START`.
 
 ## Fase 5: Mapeo de Controles y Entrada Táctil (Completada)
@@ -45,15 +46,17 @@
 - [x] **Lectura Táctil de Vita:** Se habilitó el muestreo de la pantalla táctil capacitiva con `sceTouchSetSamplingState` y la lectura por frame en `sceTouchPeek`.
 - [x] **Normalización y Conversión:** Las coordenadas en bruto del hardware táctil de Vita (1920x1088) se normalizan a la resolución del renderizador (960x544). Además, se programó un sistema básico de estado ("Touch Down", "Touch Move", "Touch Up") que inyecta el tipo de evento correspondiente hacia la máquina falsa de Java.
 
-## Fase 6: Extraer Assets y Empaquetar a VPK (En Progreso)
-- [x] **Descomprimir APK:** Se ha extraído exitosamente el archivo `zenonia2-1-0-5.zip` en la carpeta temporal `apk_extract/`.
-- [x] **Migración de Assets:** Se ha iniciado la transferencia masiva de la carpeta `assets/` extraída hacia el directorio final `ux0_data/zenonia-2/assets/` donde la librería `.so` buscará todos sus recursos.
-- [x] **Empaquetado de LiveArea (sce_sys):** Se extrajo el icono de alta resolución (`icon170.png`) original y se ubicó en `sce_sys/icon0.png`, `pic0.png` y `startup.png`. Además se generó el `template.xml` básico. 
-*(Nota Técnica: Para compilar con éxito el .vpk final, asegúrate de convertir estos PNGs a formato 8-bit indexado usando Photoshop, GIMP o ImageMagick, tal como exige la PS Vita).*
+## Fase 6: Extraer Assets y Empaquetar a VPK (Completada)
+- [x] **Migración de Assets:** Se ha extraído exitosamente el archivo `.apk` y transferido la carpeta `assets/` hacia el directorio de montaje para Vita `ux0_data/zenonia-2/assets/`.
+- [x] **Empaquetado de LiveArea (sce_sys):** Se construyeron `icon0.png`, `pic0.png`, `startup.png` y el `template.xml` básico.
 
-## Fase 7: Implementación para Emulador (Vita3K) y Pruebas
-- [x] **Automatización de Build:** Se reconstruyó el archivo `build.sh` basándose en una estrategia segura que copia el código fuente a `/tmp` antes de compilar para evitar el temido error de espacios en los directorios al empaquetar VPKs.
-- [x] **Despliegue a Vita3K:** Se generó una copia del instalable nombrada exclusivamente como `zenonia_2_vita3k.vpk` y se inyectaron automáticamente los datos gráficos del juego en la carpeta del disco duro virtual del emulador.
+## Fase 7: Sistema de Archivos (File I/O) y Depuración de Crasheos (En Progreso)
+- [x] **Intercepción de Archivos:** El motor original busca archivos relativos que PS Vita asume que están en `app0:/` de forma automática. Se escribieron *hooks* (`fopen_hook`, `stat_hook`, `access_hook`) inyectados dinámicamente mediante la tabla de dependencias (`default_dynlib`) para redirigir toda lectura hacia `ux0:data/zenonia-2/assets/`.
+- [x] **Depuración de Crash (`EXC_BAD_ACCESS`):** Gracias al sistema de logs personalizado (`game_log`), descubrimos que las funciones internas del binario original usan agresivamente la llamada al sistema POSIX `stat` y `access` de forma relativa (por ejemplo `data/eng/XlsParticle.zt1`). La intercepción de estas llamadas soluciona crasheos por punteros inválidos al intentar leer archivos que no existían.
+
+## Fase 8: Automatización e Integración Continua (Completada)
+- [x] **Build Script Automatizado (`build.sh`):** Ejecuta de forma segura `cmake` y `make` en el directorio temporal `/tmp/zenonia2-build` y genera directamente los instaladores VPK listos para emulador y consola.
+- [x] **Git:** Configuración inicial e ignorado correcto de carpetas de assets y binarios (`.gitignore`). Commit inicial.
 
 ## Siguiente Paso del Plan de Porteo Original
-Basado en `plan_zenonia_port.md`, **hemos completado hasta el apartado 6 (Entradas y Táctil) y saltado al 8-10 para empaquetar.** Nos queda pendiente la **Fase 7: Audio (Música y SFX)**. Deberemos interceptar las llamadas JNI del MediaPlayer original de Android para traducirlas a las librerías de sonido nativas de la Vita (o simplemente silenciarlas de forma segura para evitar crasheos si el juego intenta reproducir música).
+Basado en `plan_zenonia_port.md`, **hemos completado las bases de File I/O y JNI Hooks.** El siguiente paso será realizar la prueba manual en Vita3K para comprobar que el *splash screen* del motor Gamevil o el menú principal se dibujan en pantalla sin interrupciones. Queda pendiente la **Fase: Audio (Música y SFX)** para traducir las llamadas de MediaPlayer originales hacia `SceAudio`.

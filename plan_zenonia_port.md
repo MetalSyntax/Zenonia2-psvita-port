@@ -21,20 +21,20 @@ Este plan detalla los pasos necesarios para llevar a cabo el port de Zenonia 2 (
 
 ## 4. Implementación de Falso JNI (Java Native Interface)
 
-- [ ] **Entorno Falso JNI:** El juego de Android usa JNI para interactuar con la parte Java (actividad principal, inputs, música, guardado). Implementar una estructura JNI falsa para atrapar las llamadas.
-- [ ] **Inicialización (NativeInit):** Enganchar e invocar el método equivalente a `JNI_OnLoad` o las funciones nativas que levantan la aplicación.
-- [ ] **Ciclo de Vida:** Emular llamadas al ciclo de vida de la actividad (pausa, reanudación, destrucción).
+- [x] **Entorno Falso JNI:** El juego de Android usa JNI para interactuar con la parte Java (actividad principal, inputs, música, guardado). Implementar una estructura JNI falsa para atrapar las llamadas.
+- [x] **Inicialización (NativeInit):** Enganchar e invocar el método equivalente a `JNI_OnLoad` o las funciones nativas que levantan la aplicación.
+- [x] **Ciclo de Vida:** Emular llamadas al ciclo de vida de la actividad (pausa, reanudación, destrucción).
 
 ## 5. Renderizado y Gráficos (vitaGL)
 
-- [ ] **Traducción OpenGL ES:** Enlazar las llamadas de GLES 1.1 / 2.0 que hace la librería a las implementaciones proporcionadas por `vitaGL` o parchearlas directamente en la Vita.
-- [ ] **Configuración del Contexto EGL/GLES:** Crear una ventana (framebuffer) compatible con la Vita y pasarle el contexto al hilo principal de renderizado del juego.
-- [ ] **Resolución de Pantalla:** Escalar o ajustar la resolución original de Zenonia 2 (posiblemente para pantallas de teléfonos de la época) a la resolución nativa de la Vita (960x544).
+- [x] **Traducción OpenGL ES:** Enlazar las llamadas de GLES 1.1 / 2.0 que hace la librería a las implementaciones proporcionadas por `vitaGL` o parchearlas directamente en la Vita.
+- [x] **Configuración del Contexto EGL/GLES:** Crear una ventana (framebuffer) compatible con la Vita y pasarle el contexto al hilo principal de renderizado del juego.
+- [x] **Resolución de Pantalla:** Escalar o ajustar la resolución original de Zenonia 2 (posiblemente para pantallas de teléfonos de la época) a la resolución nativa de la Vita (960x544).
 
 ## 6. Entradas (Controles y Táctil)
 
-- [ ] **Mapeo de Botones:** Leer la entrada física usando `sceCtrlReadBufferPositive`. Enviar estos eventos a la lógica del juego. Como Zenonia 2 era originalmente táctil pero con un pad virtual, puede requerir inyectar coordenadas táctiles o interceptar el mapeo del D-pad virtual hacia botones reales de la Vita.
-- [ ] **Entrada Táctil:** Habilitar el uso de `sceTouchRead` para soportar la pantalla táctil en menús, inyectando eventos equivalentes de "Touch Down", "Touch Move" y "Touch Up" vía el Falso JNI.
+- [x] **Mapeo de Botones:** Leer la entrada física usando `sceCtrlReadBufferPositive`. Enviar estos eventos a la lógica del juego. Como Zenonia 2 era originalmente táctil pero con un pad virtual, puede requerir inyectar coordenadas táctiles o interceptar el mapeo del D-pad virtual hacia botones reales de la Vita.
+- [x] **Entrada Táctil:** Habilitar el uso de `sceTouchRead` para soportar la pantalla táctil en menús, inyectando eventos equivalentes de "Touch Down", "Touch Move" y "Touch Up" vía el Falso JNI.
 
 ## 7. Audio (Música y SFX)
 
@@ -43,13 +43,13 @@ Este plan detalla los pasos necesarios para llevar a cabo el port de Zenonia 2 (
 
 ## 8. Almacenamiento y Assets
 
-- [ ] **Rutas del Sistema de Archivos:** Interceptar las llamadas a `fopen`, `open`, `stat`, etc. para redirigir las lecturas de los archivos hacia `ux0:data/zenonia-2/assets/` en la Vita.
-- [ ] **Empaquetado y Permisos:** Probar que el juego cargue correctamente todo desde `ux0_data` sin fallos. El usuario debe copiar manualmente la carpeta `assets` a esa ruta en su consola.
+- [x] **Rutas del Sistema de Archivos:** Interceptar las llamadas a `fopen`, `open`, `stat`, etc. para redirigir las lecturas de los archivos hacia `ux0:data/zenonia-2/assets/` en la Vita.
+- [x] **Empaquetado y Permisos:** Probar que el juego cargue correctamente todo desde `ux0_data` sin fallos. El usuario debe copiar manualmente la carpeta `assets` a esa ruta en su consola.
 
 ## 9. Construcción y LiveArea
 
-- [ ] **Configuración LiveArea (`sce_sys/`):** Editar `param.sfo` y añadir las imágenes estáticas (`icon0.png`, `pic0.png`, `bg0.png`) con el formato correcto (PNG 8-bit indexado, sin metadata macos `._`) para evitar el error `0x8010113D`.
-- [ ] **Compilación:** Correr el build script o `make` para generar el `zenonia2.vpk` final.
+- [x] **Configuración LiveArea (`sce_sys/`):** Editar `param.sfo` y añadir las imágenes estáticas (`icon0.png`, `pic0.png`, `bg0.png`) con el formato correcto (PNG 8-bit indexado, sin metadata macos `._`) para evitar el error `0x8010113D`.
+- [x] **Compilación:** Correr el build script o `make` para generar el `zenonia2.vpk` final.
 
 ## 10. Pruebas y Depuración
 
