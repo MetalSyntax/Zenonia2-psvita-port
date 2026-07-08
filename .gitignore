@@ -1,0 +1,31 @@
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Build files
+build/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+*.elf
+*.vpk
+*.suprx
+
+# Archives and APKS
+*.zip
+*.apk
+zenonia2-1-0-5.apk
+zenonia2-1-0-5.zip
+psvita-port-toolkit.zip
+
+# Proprietary Game Files (Do not commit to Github)
+lib/
+ux0_data/zenonia-2/assets/
+ux0_data/
+apk_extract
