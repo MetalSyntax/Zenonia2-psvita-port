@@ -28,15 +28,39 @@ set(VITA_TITLEID  "PSVZ00002")
 # Optional version string to show in LiveArea's more info screen
 set(VITA_VERSION  "01.00")
 
+## Vita3K's kubridge HLE doesn't support fixed-address kuKernelAllocMemBlock,
+## so so_util.c needs a different (still-kubridge-based) memory layout under
+## the emulator -- see loader/so_util.c's EMULATOR_BUILD branch. Real hardware
+## testing should build with -DEMULATOR_BUILD=OFF.
+option(EMULATOR_BUILD "Target Vita3K instead of real hardware for so_util's memory allocation strategy" ON)
+if (EMULATOR_BUILD)
+  add_definitions(-DEMULATOR_BUILD)
+endif()
+
+## Temporary verbose JNI tracing while bringing the port up -- shows every
+## GetMethodID/GetStaticMethodID lookup and dispatch, not just the ones we
+## implemented ourselves. Turn this OFF once boot is stable (each call opens+
+## writes+closes the log file -- see Prince of Persia's Fixes_Log.md #12/13
+## for the perf regression this caused there).
+option(ENABLE_VERBOSE_JNI_LOG "Log every FalsoJNI call (debug only, slow)" ON)
+if (ENABLE_VERBOSE_JNI_LOG)
+  add_definitions(-DFALSOJNI_DEBUGLEVEL=0)
+endif()
+
 ## Flags and includes for building
 # Note that we make sure not to overwrite previous flags
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 # Optional. You can specify more param.sfo flags this way.
-set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d PARENTAL_LEVEL=1")
+# ATTRIBUTE2=12 requests the extended/high memory budget. Without it, vitaGL's
+# SceShaccCg (Cg shader compiler) initialization deterministically null-derefs
+# inside Vita3K's call_import while starting the module -- confirmed by
+# comparing against Prince of Persia's working Vita3K config, which sets this.
+set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d PARENTAL_LEVEL=1 -d ATTRIBUTE2=12")
 # Add any additional include paths here
 include_directories(
   ./common # This is for debugScreenPrintf(), you shouldn't need it in your projects
+  ./lib    # for <falso_jni/FalsoJNI.h>
 )
 
 # Add any additional library paths here
@@ -51,8 +75,11 @@ add_executable(${PROJECT_NAME}
   ./loader/main.c
   ./loader/dynlib.c
   ./loader/so_util.c
-  ./loader/jni_stubs.c
+  ./loader/java.c
   ./common/debugScreen.c
+  ./lib/falso_jni/FalsoJNI.c
+  ./lib/falso_jni/FalsoJNI_ImplBridge.c
+  ./lib/falso_jni/FalsoJNI_Logger.c
 )
 
 # Library to link to (drop the -l prefix).
@@ -61,6 +88,7 @@ target_link_libraries(${PROJECT_NAME}
   vitashark
   mathneon
   m
+  -Wl,--whole-archive pthread -Wl,--no-whole-archive
   SceDisplay_stub
   SceCtrl_stub
   SceTouch_stub
@@ -76,13 +104,12 @@ target_link_libraries(${PROJECT_NAME}
   SceCommonDialog_stub
   SceKernelDmacMgr_stub
   SceLibKernel_stub
-  SceLibc_stub
   taihen_stub
   kubridge_stub
 )
 
 ## Create Vita files
-vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME})
+vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME} UNSAFE NOASLR)
 # The FILE directive lets you add additional files to the VPK, the syntax is
 # FILE src_path dst_path_in_vpk. In this case, we add the LiveArea paths.
 vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self

@@ -25,7 +25,7 @@ zenonia2-1-0-5.zip
 psvita-port-toolkit.zip
 
 # Proprietary Game Files (Do not commit to Github)
-lib/
+lib/libzenonia2.so
 ux0_data/zenonia-2/assets/
 ux0_data/
 apk_extract

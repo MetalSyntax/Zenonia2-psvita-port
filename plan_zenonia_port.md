@@ -2,6 +2,8 @@
 
 Este plan detalla los pasos necesarios para llevar a cabo el port de Zenonia 2 (Android) a PS Vita utilizando el `psvita-port-toolkit` (SoLoader Boilerplate) proporcionado, la librería `.so` del juego original y sus assets.
 
+> **Actualización 2026-07-08 — leer antes de seguir:** los items marcados `[x]` en las secciones 4 y 5 estaban escritos a partir del código, no de una prueba real — el juego nunca se había ejecutado de punta a punta hasta esta fecha. Al probarlo por primera vez se encontraron y corrigieron dos bugs reales que impedían arrancar (FakeJNI incompleto que corrompía memoria, vitaGL nunca inicializado). El objetivo de prueba **cambió de Vita3K a consola real**: Vita3K demostró tener un crash propio del emulador al inicializar vitaGL (reproducido incluso con el port de referencia que sí funciona), no confiable como entorno de prueba en este momento. Ver `port_progress.md` Fase 9 para el detalle completo y los pasos siguientes concretos.
+
 ## 1. Configuración del Entorno y Preparación
 
 - [ ] **Configurar VitaSDK:** Asegurar que las variables de entorno de VitaSDK están correctamente configuradas y actualizadas.
@@ -21,15 +23,15 @@ Este plan detalla los pasos necesarios para llevar a cabo el port de Zenonia 2 (
 
 ## 4. Implementación de Falso JNI (Java Native Interface)
 
-- [x] **Entorno Falso JNI:** El juego de Android usa JNI para interactuar con la parte Java (actividad principal, inputs, música, guardado). Implementar una estructura JNI falsa para atrapar las llamadas.
-- [x] **Inicialización (NativeInit):** Enganchar e invocar el método equivalente a `JNI_OnLoad` o las funciones nativas que levantan la aplicación.
-- [x] **Ciclo de Vida:** Emular llamadas al ciclo de vida de la actividad (pausa, reanudación, destrucción).
+- [x] **Entorno Falso JNI:** ~~estructura hecha a mano~~ → reemplazada por **FalsoJNI** (vendorizada en `lib/falso_jni/`, tomada del port de Prince of Persia) tras confirmar que la tabla manual de 300 slots solo cubría 3 funciones reales y corrompía memoria en el resto (`GetStringUTFChars` sin implementar → ver `port_progress.md` §9.1). Registrado solo `readAssets` en `loader/java.c`, que es lo único que este motor necesita del lado "Java".
+- [x] **Inicialización (NativeInit):** confirmado — `Game_JNI_OnLoad`/`NativeInit`/`NativeResize` se resuelven y se llaman correctamente con `&jvm`/`&jni` reales de FalsoJNI.
+- [ ] **Ciclo de Vida:** pausa/reanudación/destrucción (`NativePauseClet`, `NativeDestroyClet` vistos en el análisis de símbolos) — no implementado todavía, no bloquea llegar al menú.
 
 ## 5. Renderizado y Gráficos (vitaGL)
 
-- [x] **Traducción OpenGL ES:** Enlazar las llamadas de GLES 1.1 / 2.0 que hace la librería a las implementaciones proporcionadas por `vitaGL` o parchearlas directamente en la Vita.
-- [x] **Configuración del Contexto EGL/GLES:** Crear una ventana (framebuffer) compatible con la Vita y pasarle el contexto al hilo principal de renderizado del juego.
-- [x] **Resolución de Pantalla:** Escalar o ajustar la resolución original de Zenonia 2 (posiblemente para pantallas de teléfonos de la época) a la resolución nativa de la Vita (960x544).
+- [x] **Traducción OpenGL ES:** enlazado a `vitaGL` vía `so_resolve`'s fallback a `vglGetProcAddress` (ver `loader/so_util.c`) + wrappers de punto fijo en `dynlib.c` (`glClearColorx`, `glTexParameterx`).
+- [x] **Configuración del Contexto:** `gl_init()` en `loader/main.c` ahora sí llama a `vglInitExtended(...)` (antes estaba comentado — ver `port_progress.md` §9.2). **Sin verificar en consola real todavía** — en Vita3K esta inicialización crashea, pero se confirmó que es un bug del emulador (reproducido con un port de referencia que sí funciona), no de este código — ver `port_progress.md` §9.4.
+- [x] **Resolución de Pantalla:** 960x544 fijo, sin escalado adicional (el motor ya recibe `NativeResize(..., 960, 544)`).
 
 ## 6. Entradas (Controles y Táctil)
 
@@ -53,4 +55,5 @@ Este plan detalla los pasos necesarios para llevar a cabo el port de Zenonia 2 (
 
 ## 10. Pruebas y Depuración
 
-- [ ] **Vita3K / Consola Real:** Desplegar el `.vpk` por FTP y monitorear la salida en la consola de depuración para corregir accesos ilegales a memoria (Data Abort) e iterar.
+- [ ] **Consola Real (prioridad actual):** Desplegar `build/zenonia_2.vpk` + `ux0_data/zenonia-2/` por FTP (VitaShell) y monitorear `ux0:data/zenonia-2/log.txt` para corregir accesos ilegales a memoria (Data Abort) e iterar — metodología detallada en la skill `psvita-porting` (`references/hardware_debugging.md`). Si crashea, analizar el `.psp2dmp` con `vita-parse-core` contra `build/zenonia_2.elf`.
+- [x] ~~Vita3K~~: descartado temporalmente como entorno de prueba — vitaGL crashea de forma reproducible al iniciar Vita3K, confirmado como inestabilidad del propio emulador (afecta también a un port de referencia que sí funciona) y no del código de este port. Ver `port_progress.md` §9.4 para el detalle de la investigación.
