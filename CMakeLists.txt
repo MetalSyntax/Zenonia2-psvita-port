@@ -28,20 +28,21 @@ set(VITA_TITLEID  "PSVZ00002")
 # Optional version string to show in LiveArea's more info screen
 set(VITA_VERSION  "01.00")
 
-## Vita3K's kubridge HLE doesn't support fixed-address kuKernelAllocMemBlock,
-## so so_util.c needs a different (still-kubridge-based) memory layout under
-## the emulator -- see loader/so_util.c's EMULATOR_BUILD branch. Real hardware
-## testing should build with -DEMULATOR_BUILD=OFF.
-option(EMULATOR_BUILD "Target Vita3K instead of real hardware for so_util's memory allocation strategy" ON)
+## Currently unused by loader/so_util.c (reverted to the original, non-kubridge
+## memory strategy after the Vita3K vitaGL crash turned out to be emulator
+## session instability, not a memory-layout bug -- see port_progress.md §9.4).
+## Kept as a no-op flag in case a Vita3K-specific path is reintroduced later.
+## Real hardware is the default target now.
+option(EMULATOR_BUILD "Target Vita3K instead of real hardware (currently unused, see comment above)" OFF)
 if (EMULATOR_BUILD)
   add_definitions(-DEMULATOR_BUILD)
 endif()
 
-## Temporary verbose JNI tracing while bringing the port up -- shows every
-## GetMethodID/GetStaticMethodID lookup and dispatch, not just the ones we
-## implemented ourselves. Turn this OFF once boot is stable (each call opens+
-## writes+closes the log file -- see Prince of Persia's Fixes_Log.md #12/13
-## for the perf regression this caused there).
+## Verbose JNI tracing (every GetMethodID/GetStaticMethodID lookup and
+## dispatch). OFF by default -- Prince of Persia's Fixes_Log.md #12/13
+## documents this exact setting (FALSOJNI_DEBUGLEVEL=0) making the game
+## unplayably slow, since every JNI call pays a full file open+write+close.
+## Turn ON only to debug a specific boot issue, then back OFF.
 option(ENABLE_VERBOSE_JNI_LOG "Log every FalsoJNI call (debug only, slow)" ON)
 if (ENABLE_VERBOSE_JNI_LOG)
   add_definitions(-DFALSOJNI_DEBUGLEVEL=0)
@@ -76,6 +77,7 @@ add_executable(${PROJECT_NAME}
   ./loader/dynlib.c
   ./loader/so_util.c
   ./loader/java.c
+  ./loader/audio.c
   ./common/debugScreen.c
   ./lib/falso_jni/FalsoJNI.c
   ./lib/falso_jni/FalsoJNI_ImplBridge.c
@@ -88,6 +90,9 @@ target_link_libraries(${PROJECT_NAME}
   vitashark
   mathneon
   m
+  # Decodificador OGG Vorbis (Tremor, punto fijo) para loader/audio.c
+  vorbisidec
+  ogg
   -Wl,--whole-archive pthread -Wl,--no-whole-archive
   SceDisplay_stub
   SceCtrl_stub
@@ -117,6 +122,10 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   NAME ${VITA_APP_NAME}
   FILE sce_sys/icon0.png sce_sys/icon0.png
   FILE sce_sys/pic0.png sce_sys/pic0.png
+  FILE sce_sys/livearea/contents/bg0.png sce_sys/livearea/contents/bg0.png
   FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
   FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+  # Splash en crudo (960x544 RGBA8888, generado desde bg0.png) que el loader
+  # muestra en vez de la pantalla blanca de logo/titulo (ver splash_* en main.c)
+  FILE splash.rgba splash.rgba
 )

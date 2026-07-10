@@ -29,3 +29,27 @@ lib/libzenonia2.so
 ux0_data/zenonia-2/assets/
 ux0_data/
 apk_extract
+zenonia2.apk
+
+# Real-hardware debugging artifacts (crash dumps, logs pulled via FTP)
+log.txt
+*.psp2dmp
+/logs
+
+# Java del APK decompilado con jadx (derivado de material propietario, regenerable:
+# `jadx -d apk_decompiled apk_extract/classes.dex` — ver port_progress.md §10.8)
+apk_decompiled/
+
+# Decompiler folders and output
+uploads/
+output/
+
+# Logs
+log_*.txt
+
+# Temporary assets
+*.rgba
+
+# Legacy / external files
+PS Vita
+

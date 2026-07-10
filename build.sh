@@ -50,18 +50,42 @@ fi
 
 echo "✅ Build exitoso: $PROJECT_DIR/build/$VPK_NAME"
 
+echo "¿Para qué plataforma quieres configurar la instalación? (1: Vita3K, 2: PS Vita)"
+read -p "Opción [1]: " PLATFORM_OPTION
+PLATFORM_OPTION=${PLATFORM_OPTION:-1}
+
+read -p "¿Quieres instalar o transferir el .vpk automáticamente? (s/n) [s]: " INSTALL_VPK
+INSTALL_VPK=${INSTALL_VPK:-s}
+
 echo "[4/4] Instalación..."
-VITA3K_APP="/Applications/Vita3K.app/Contents/MacOS/Vita3K"
-if [ -x "$VITA3K_APP" ]; then
-    echo "🎮 Lanzando Vita3K y cargando VPK..."
-    # Vita3K instala y ejecuta automáticamente el VPK cuando se le pasa por argumento
-    # Forzamos el backend a OpenGL
-    "$VITA3K_APP" -B OpenGL "$PROJECT_DIR/build/$VPK_NAME" > /dev/null 2>&1 &
-    echo "¡Listo! El juego se está abriendo."
+if [ "$INSTALL_VPK" = "s" ] || [ "$INSTALL_VPK" = "S" ]; then
+    if [ "$PLATFORM_OPTION" = "1" ]; then
+        VITA3K_APP="/Applications/Vita3K.app/Contents/MacOS/Vita3K"
+        if [ -x "$VITA3K_APP" ]; then
+            echo "🎮 Lanzando Vita3K y cargando VPK..."
+            # Forzamos el backend a OpenGL
+            "$VITA3K_APP" -B OpenGL "$PROJECT_DIR/build/$VPK_NAME" > /dev/null 2>&1 &
+            echo "¡Listo! El juego se está abriendo."
+        else
+            echo "⚠️ Vita3K no encontrado en la ruta por defecto (/Applications/Vita3K.app)."
+            echo "=== INSTRUCCIONES PARA VITA3K ==="
+            echo "1. Ve a 'File -> Install .vpk' y selecciona 'build/zenonia_2.vpk'."
+            echo "2. Copia todo el contenido de 'ux0_data/zenonia-2/' a la ruta virtual del emulador:"
+            echo "   (Normalmente en: ~/.local/share/Vita3K/ux0/data/zenonia-2/)"
+        fi
+    elif [ "$PLATFORM_OPTION" = "2" ]; then
+        echo "Asegúrate de que VitaShell esté abierto con el servidor FTP activado en tu PS Vita."
+        read -p "Ingresa la dirección IP de tu PS Vita (ej: 192.168.1.100) (Deja en blanco para cancelar): " VITA_IP
+        if [ ! -z "$VITA_IP" ]; then
+            echo "Enviando VPK a ftp://$VITA_IP:1337/ux0:/vpk/$VPK_NAME ..."
+            curl -T "$PROJECT_DIR/build/$VPK_NAME" "ftp://$VITA_IP:1337/ux0:/vpk/$VPK_NAME"
+            echo "✅ Archivo transferido. Recuerda instalar el .vpk desde VitaShell en ux0:/vpk/ y copiar tus archivos de datos a ux0:/data/zenonia-2/"
+        else
+            echo "Transferencia a PS Vita cancelada."
+        fi
+    else
+        echo "Opción no válida. Instalación cancelada."
+    fi
 else
-    echo "⚠️ Vita3K no encontrado en la ruta por defecto (/Applications/Vita3K.app)."
-    echo "=== INSTRUCCIONES PARA VITA3K ==="
-    echo "1. Ve a 'File -> Install .vpk' y selecciona 'build/zenonia_2.vpk'."
-    echo "2. Copia todo el contenido de 'ux0_data/zenonia-2/' a la ruta virtual del emulador:"
-    echo "   (Normalmente en: ~/.local/share/Vita3K/ux0/data/zenonia-2/)"
+    echo "Instalación omitida por el usuario."
 fi
