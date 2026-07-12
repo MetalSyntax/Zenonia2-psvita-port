@@ -1,11 +1,12 @@
 #!/bin/bash
 set -e
 
-# Uso: ./build.sh [normal|shader]
+# Uso: ./build.sh [normal|shader|safe]
 # "shader" compila con ENABLE_POSTPROCESS_SHADER=ON (ver port_progress.md
 # Backlog B.1: sharpen de post-proceso sobre el blit del compositor) y genera
 # zenonia_2_shader.vpk en un build dir separado -- no toca el build "normal"
 # ya confirmado en consola (build/zenonia_2.vpk).
+# "safe" compila un VPK sin assets con copyright, seguro para distribución.
 VARIANT="${1:-normal}"
 
 # Configuración
@@ -14,16 +15,21 @@ SRC_DIR="/tmp/zenonia2-src"
 case "$VARIANT" in
     normal)
         BUILD_DIR="/tmp/zenonia2-build"
-        CMAKE_POSTPROCESS_FLAG="-DENABLE_POSTPROCESS_SHADER=OFF"
+        CMAKE_POSTPROCESS_FLAG="-DENABLE_POSTPROCESS_SHADER=OFF -DSAFE_DISTRIBUTION=OFF"
         VPK_NAME="zenonia_2.vpk"
         ;;
     shader)
         BUILD_DIR="/tmp/zenonia2-build-shader"
-        CMAKE_POSTPROCESS_FLAG="-DENABLE_POSTPROCESS_SHADER=ON"
+        CMAKE_POSTPROCESS_FLAG="-DENABLE_POSTPROCESS_SHADER=ON -DSAFE_DISTRIBUTION=OFF"
         VPK_NAME="zenonia_2_shader.vpk"
         ;;
+    safe)
+        BUILD_DIR="/tmp/zenonia2-build-safe"
+        CMAKE_POSTPROCESS_FLAG="-DENABLE_POSTPROCESS_SHADER=OFF -DSAFE_DISTRIBUTION=ON"
+        VPK_NAME="zenonia_2_safe.vpk"
+        ;;
     *)
-        echo "❌ Variante desconocida: '$VARIANT' (usar 'normal' o 'shader')"
+        echo "❌ Variante desconocida: '$VARIANT' (usar 'normal', 'shader' o 'safe')"
         exit 1
         ;;
 esac
@@ -56,7 +62,7 @@ rsync -a --exclude '.git' --exclude 'build' --exclude '.*' "$PROJECT_DIR/" "$SRC
 echo "[2/4] Ejecutando CMake y Make..."
 cd "$BUILD_DIR"
 
-cmake "$SRC_DIR" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release "$CMAKE_POSTPROCESS_FLAG"
+cmake "$SRC_DIR" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release $CMAKE_POSTPROCESS_FLAG
 make -j$(sysctl -n hw.ncpu)
 
 echo "[3/4] Exportando archivos generados..."

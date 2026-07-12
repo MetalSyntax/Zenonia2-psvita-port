@@ -63,6 +63,12 @@ else()
   set(VPK_SUFFIX "")
 endif()
 
+## Option to build a safe VPK without copyrighted assets
+option(SAFE_DISTRIBUTION "Build VPK without copyrighted assets for safe distribution" OFF)
+if (SAFE_DISTRIBUTION)
+  set(VPK_SUFFIX "_safe")
+endif()
+
 ## Flags and includes for building
 # Note that we make sure not to overwrite previous flags
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
@@ -133,20 +139,28 @@ target_link_libraries(${PROJECT_NAME}
 vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME} UNSAFE NOASLR)
 # The FILE directive lets you add additional files to the VPK, the syntax is
 # FILE src_path dst_path_in_vpk. In this case, we add the LiveArea paths.
-vita_create_vpk(${PROJECT_NAME}${VPK_SUFFIX}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
-  VERSION ${VITA_VERSION}
-  NAME ${VITA_APP_NAME}
-  FILE sce_sys/icon0.png sce_sys/icon0.png
-  FILE sce_sys/pic0.png sce_sys/pic0.png
-  FILE sce_sys/livearea/contents/bg0.png sce_sys/livearea/contents/bg0.png
-  FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
-  FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
-  # Splash/titulo en crudo (960x544 RGBA8888, generados desde logo.png/title.png
-  # del APK original, escalados a pantalla completa) que el loader muestra en
-  # vez de la pantalla blanca de logo/titulo (ver splash_* en main.c). touch.rgba
-  # (310x30) es el aviso "toca para continuar" que Android parpadeaba sobre el
-  # titulo (Zenonia2UIControllerView.showTouchViewAnim).
-  FILE splash.rgba splash.rgba
-  FILE title.rgba title.rgba
-  FILE touch.rgba touch.rgba
-)
+
+if(SAFE_DISTRIBUTION)
+  vita_create_vpk(${PROJECT_NAME}${VPK_SUFFIX}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
+    VERSION ${VITA_VERSION}
+    NAME ${VITA_APP_NAME}
+  )
+else()
+  vita_create_vpk(${PROJECT_NAME}${VPK_SUFFIX}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
+    VERSION ${VITA_VERSION}
+    NAME ${VITA_APP_NAME}
+    FILE sce_sys/icon0.png sce_sys/icon0.png
+    FILE sce_sys/pic0.png sce_sys/pic0.png
+    FILE sce_sys/livearea/contents/bg0.png sce_sys/livearea/contents/bg0.png
+    FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
+    FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+    # Splash/titulo en crudo (960x544 RGBA8888, generados desde logo.png/title.png
+    # del APK original, escalados a pantalla completa) que el loader muestra en
+    # vez de la pantalla blanca de logo/titulo (ver splash_* en main.c). touch.rgba
+    # (310x30) es el aviso "toca para continuar" que Android parpadeaba sobre el
+    # titulo (Zenonia2UIControllerView.showTouchViewAnim).
+    FILE splash.rgba splash.rgba
+    FILE title.rgba title.rgba
+    FILE touch.rgba touch.rgba
+  )
+endif()

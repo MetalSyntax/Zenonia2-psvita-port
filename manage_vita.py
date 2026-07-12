@@ -230,14 +230,14 @@ def download_latest_debug_files():
             pass
 
 def run_clean_macos():
-    print("[*] Ejecutando clean_macos_files.sh...")
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clean_macos_files.sh")
+    print("[*] Ejecutando clean_macos.sh...")
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clean_macos.sh")
     if os.path.exists(script_path):
         try:
             subprocess.run(["bash", script_path], check=True)
-            print("[+] clean_macos_files.sh ejecutado exitosamente.")
+            print("[+] clean_macos.sh ejecutado exitosamente.")
         except subprocess.CalledProcessError as e:
-            print(f"[-] Error al ejecutar clean_macos_files.sh: {e}")
+            print(f"[-] Error al ejecutar clean_macos.sh: {e}")
         except Exception as e:
             print(f"[-] Ocurrió un error inesperado: {e}")
     else:
@@ -249,7 +249,7 @@ def main():
         print("1. Subir VPK compilado a la PS Vita (ux0:downloads/)")
         print("2. Descargar el último dump (.dmp) y el último log (.txt) a la carpeta actual")
         print("3. Desconectar Proton VPN ahora mismo")
-        print("4. Ejecutar clean_macos_files.sh (limpiar archivos ocultos de macOS)")
+        print("4. Ejecutar clean_macos.sh (limpiar archivos ocultos de macOS)")
         print("5. Salir")
         print("====================================================")
         try:
