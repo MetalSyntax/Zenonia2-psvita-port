@@ -1,14 +1,35 @@
 #!/bin/bash
 set -e
 
+# Uso: ./build.sh [normal|shader]
+# "shader" compila con ENABLE_POSTPROCESS_SHADER=ON (ver port_progress.md
+# Backlog B.1: sharpen de post-proceso sobre el blit del compositor) y genera
+# zenonia_2_shader.vpk en un build dir separado -- no toca el build "normal"
+# ya confirmado en consola (build/zenonia_2.vpk).
+VARIANT="${1:-normal}"
+
 # Configuración
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="/tmp/zenonia2-build"
 SRC_DIR="/tmp/zenonia2-src"
-VPK_NAME="zenonia_2.vpk"
+case "$VARIANT" in
+    normal)
+        BUILD_DIR="/tmp/zenonia2-build"
+        CMAKE_POSTPROCESS_FLAG="-DENABLE_POSTPROCESS_SHADER=OFF"
+        VPK_NAME="zenonia_2.vpk"
+        ;;
+    shader)
+        BUILD_DIR="/tmp/zenonia2-build-shader"
+        CMAKE_POSTPROCESS_FLAG="-DENABLE_POSTPROCESS_SHADER=ON"
+        VPK_NAME="zenonia_2_shader.vpk"
+        ;;
+    *)
+        echo "❌ Variante desconocida: '$VARIANT' (usar 'normal' o 'shader')"
+        exit 1
+        ;;
+esac
 
 echo "================================================================"
-echo "  🚀 Script de Build Automático para Zenonia 2 (PS Vita)"
+echo "  🚀 Script de Build Automático para Zenonia 2 (PS Vita) [$VARIANT]"
 echo "================================================================"
 
 echo "[1/4] Preparando entorno de compilación..."
@@ -35,7 +56,7 @@ rsync -a --exclude '.git' --exclude 'build' --exclude '.*' "$PROJECT_DIR/" "$SRC
 echo "[2/4] Ejecutando CMake y Make..."
 cd "$BUILD_DIR"
 
-cmake "$SRC_DIR" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release
+cmake "$SRC_DIR" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release "$CMAKE_POSTPROCESS_FLAG"
 make -j$(sysctl -n hw.ncpu)
 
 echo "[3/4] Exportando archivos generados..."
@@ -45,7 +66,7 @@ if [ -f "eboot.bin" ]; then
     cp "eboot.bin" "$PROJECT_DIR/build/eboot.bin"
 fi
 if [ -f "zenonia_2" ]; then
-    cp "zenonia_2" "$PROJECT_DIR/build/zenonia_2.elf"
+    cp "zenonia_2" "$PROJECT_DIR/build/${VPK_NAME%.vpk}.elf"
 fi
 
 echo "✅ Build exitoso: $PROJECT_DIR/build/$VPK_NAME"
@@ -69,7 +90,7 @@ if [ "$INSTALL_VPK" = "s" ] || [ "$INSTALL_VPK" = "S" ]; then
         else
             echo "⚠️ Vita3K no encontrado en la ruta por defecto (/Applications/Vita3K.app)."
             echo "=== INSTRUCCIONES PARA VITA3K ==="
-            echo "1. Ve a 'File -> Install .vpk' y selecciona 'build/zenonia_2.vpk'."
+            echo "1. Ve a 'File -> Install .vpk' y selecciona 'build/$VPK_NAME'."
             echo "2. Copia todo el contenido de 'ux0_data/zenonia-2/' a la ruta virtual del emulador:"
             echo "   (Normalmente en: ~/.local/share/Vita3K/ux0/data/zenonia-2/)"
         fi

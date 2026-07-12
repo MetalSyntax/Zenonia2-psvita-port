@@ -11,6 +11,7 @@
 
 #include <vitaGL.h>
 #include "so_util.h"
+#include "postprocess.h"
 
 extern int __android_log_print(int prio, const char *tag, const char *fmt, ...);
 extern void game_log(const char *fmt, ...);
@@ -71,6 +72,11 @@ void glTexImage2D_wrapper(GLenum target, GLint level, GLint internalformat, GLsi
             uint16_t *p = (uint16_t *)pixels;
             game_log("  -> First 4 pixels: %04x %04x %04x %04x\n", p[0], p[1], p[2], p[3]);
         }
+        // Unica textura RGB565 del motor: el buffer compuesto 400x240 (subido
+        // a un POT via glTexSubImage2D despues). El shader de post-proceso
+        // opcional necesita el tamaño real de este POT para su uniform de
+        // texel size -- ver postprocess.c.
+        postprocess_set_source_size(width, height);
         void *new_pixels = convert_rgb565_to_rgba8888(pixels, width, height);
         glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, new_pixels);
         if (new_pixels) free(new_pixels);
@@ -99,6 +105,10 @@ void glTexSubImage2D_wrapper(GLenum target, GLint level, GLint xoffset, GLint yo
     glGetError();
     
     if (format == GL_RGB && type == GL_UNSIGNED_SHORT_5_6_5) {
+        // w=400 h=240 es la firma unica del blit del compositor (confirmado
+        // en log) -- marcarlo para que el proximo glDrawArrays use el shader
+        // de post-proceso opcional en vez de fixed-function GL_REPLACE.
+        if (width == 400 && height == 240) postprocess_mark_next_draw();
         void *new_pixels = convert_rgb565_to_rgba8888(pixels, width, height);
         glTexSubImage2D(target, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, new_pixels);
         if (new_pixels) free(new_pixels);
@@ -196,6 +206,13 @@ void glDrawArrays_wrapper(GLenum mode, GLint first, GLsizei count) {
         }
         glTexCoordPointer(pending_fixed_texcoord_size, GL_FLOAT, 0, fixed_texcoord_buf);
     }
+
+    // No-op (devuelve 0) a menos que se haya compilado con
+    // ENABLE_POSTPROCESS_SHADER Y este sea el blit del compositor marcado por
+    // glTexSubImage2D_wrapper -- en ese caso dibuja ella misma el quad (con
+    // su propia geometria, ver postprocess.c) y hay que saltearse el
+    // glDrawArrays original de mas abajo.
+    if (postprocess_try_draw()) return;
 
     glDrawArrays(mode, first, count);
 }

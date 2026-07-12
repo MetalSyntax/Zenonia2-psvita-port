@@ -12,12 +12,15 @@
 #include <psp2/display.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #include "debugScreen.h"
 #include "so_util.h"
 #include "audio.h"
+#include "postprocess.h"
 #include <taihen.h>
 #include <vitaGL.h>
 #include <falso_jni/FalsoJNI.h>
@@ -198,37 +201,62 @@ static void apply_so_patches(so_module *mod) {
              (unsigned int)(mod->text_base + 0xaec38));
 }
 
-// --- Splash: bg0 (la misma imagen de LiveArea) en pantalla hasta que el motor
-// dibuje contenido real. Los estados 0 (logo Gamevil) y 1 (titulo) eran UI de
-// Java en Android (aca se verian blancos); a partir del estado 2 el motor
-// nativo ya dibuja el menu. g_ui_status lo actualiza java.c. ---
+// --- Splash: logo.png/title.png/touch.png reales del APK (no el bg0 de
+// LiveArea, que tiene el logo achicado y centrado sobre bordes negros
+// pensados para la safe zone de LiveArea, no para pantalla completa) en
+// pantalla hasta que el motor dibuje contenido real. Los estados 0 (logo
+// Gamevil) y 1 (titulo) eran UI de Java en Android (aca se verian blancos);
+// a partir del estado 2 el motor nativo ya dibuja el menu. En el estado 1,
+// Android ademas parpadeaba touch.png ("toca para continuar", ver
+// Zenonia2UIControllerView.showTouchViewAnim/TouchViewTimeTask en el APK
+// decompilado) centrado horizontalmente a 3/4 de la pantalla -- sin ese
+// aviso la pantalla de titulo se ve "trabada" hasta que el usuario prueba
+// de tocar/apretar por su cuenta. g_ui_status lo actualiza java.c. ---
 extern volatile int g_ui_status;
 
-static GLuint splash_tex = 0;
+static GLuint logo_tex = 0;
+static GLuint title_tex = 0;
+static GLuint touch_tex = 0;
+// touch.rgba se genero escalando touch.png (258x25) por el mismo factor
+// "cover" que title.rgba (800x480 -> 960x544, factor 1.2x) para que se vea
+// consistente con el arte del titulo.
+#define TOUCH_TEX_W 310
+#define TOUCH_TEX_H 30
+#define TOUCH_TEX_X ((960 - TOUCH_TEX_W) / 2)
+#define TOUCH_TEX_Y ((544 * 3) / 4)
 
-static void splash_load(void) {
-    FILE *f = fopen("app0:splash.rgba", "rb");
+static GLuint load_rgba_tex(const char *path, int w, int h) {
+    FILE *f = fopen(path, "rb");
     if (!f) {
-        game_log("splash: app0:splash.rgba no encontrado\n");
-        return;
+        game_log("splash: %s no encontrado\n", path);
+        return 0;
     }
-    void *data = malloc(960 * 544 * 4);
-    if (!data) { fclose(f); return; }
-    fread(data, 1, 960 * 544 * 4, f);
+    size_t size = (size_t)w * h * 4;
+    void *data = malloc(size);
+    if (!data) { fclose(f); return 0; }
+    fread(data, 1, size, f);
     fclose(f);
 
-    glGenTextures(1, &splash_tex);
-    glBindTexture(GL_TEXTURE_2D, splash_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 960, 544, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     free(data);
+    return tex;
+}
+
+static void splash_load(void) {
+    logo_tex = load_rgba_tex("app0:splash.rgba", 960, 544);
+    title_tex = load_rgba_tex("app0:title.rgba", 960, 544);
+    touch_tex = load_rgba_tex("app0:touch.rgba", TOUCH_TEX_W, TOUCH_TEX_H);
 }
 
 // Se dibuja DESPUES de NativeRender (tapa el blanco del motor) preservando las
 // matrices con push/pop; el resto del estado GL el motor lo re-setea por frame.
-static void splash_draw(void) {
-    if (!splash_tex) return;
+static void splash_draw(GLuint tex) {
+    if (!tex) return;
 
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
@@ -241,7 +269,7 @@ static void splash_draw(void) {
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, splash_tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
     glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -251,6 +279,67 @@ static void splash_draw(void) {
     glVertexPointer(2, GL_FLOAT, 0, verts);
     glTexCoordPointer(2, GL_FLOAT, 0, uvs);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+}
+
+// Aviso "toca para continuar" sobre el titulo (estado 1), replicando la
+// posicion original (centrado, topMargin = 3/4 de pantalla) y el parpadeo
+// de Zenonia2UIControllerView vía un pulso de alpha en vez del fade casi
+// imperceptible original (0.0 a 0.1 de alpha), para que se note en pantalla.
+static void touch_draw(int frame) {
+    if (!touch_tex) return;
+
+    const float alpha = 0.35f + 0.65f * (0.5f + 0.5f * sinf(frame * 0.05f));
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrthof(0, 960, 544, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, touch_tex);
+    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glColor4f(1.0f, 1.0f, 1.0f, alpha);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+
+    // static: vitaGL no consume los vertex arrays de inmediato (los referencia
+    // para el command buffer de GXM), asi que un array en el stack local aca
+    // queda invalido para cuando efectivamente se dibuja -- eso generaba la
+    // franja diagonal de colores basura reportada tras agregar este quad.
+    static const float verts[] = {
+        TOUCH_TEX_X, TOUCH_TEX_Y,
+        TOUCH_TEX_X + TOUCH_TEX_W, TOUCH_TEX_Y,
+        TOUCH_TEX_X, TOUCH_TEX_Y + TOUCH_TEX_H,
+        TOUCH_TEX_X + TOUCH_TEX_W, TOUCH_TEX_Y + TOUCH_TEX_H
+    };
+    static const float uvs[] = { 0, 0,  1, 0,    0, 1,    1, 1 };
+    glVertexPointer(2, GL_FLOAT, 0, verts);
+    glTexCoordPointer(2, GL_FLOAT, 0, uvs);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glDisable(GL_BLEND);
+    // El motor deja GL_TEXTURE_ENV_MODE en GL_REPLACE una sola vez al iniciar
+    // y nunca lo vuelve a tocar por frame (confirmado en el log: solo aparece
+    // una vez al arrancar, nunca de nuevo en el bucle de dibujo del quad
+    // compuesto 400x240). Bajo GL_REPLACE el color array por-vertice que el
+    // motor deja armado (glColorPointer, no usado por REPLACE) es irrelevante;
+    // si acá se deja en GL_MODULATE, ese color por-vertice (con valores no
+    // pensados para modular nada) empieza a multiplicar la textura del motor
+    // en TODOS los frames siguientes -- eso era la franja diagonal roja/verde
+    // reportada en menu y juego, no un problema de los vertex arrays.
+    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
 
     glMatrixMode(GL_PROJECTION);
     glPopMatrix();
@@ -317,6 +406,7 @@ int main() {
 		gl_init();
 		game_log("vitaGL inicializado.\n");
 		splash_load();
+		postprocess_init(); // no-op salvo build con ENABLE_POSTPROCESS_SHADER
 		audio_init();
 
 		jni_init();
@@ -410,9 +500,14 @@ int main() {
 			if (NativeRender) NativeRender(jniEnv, NULL);
 
 			// Mientras el motor este en logo (0) / titulo (1) -- pantallas que
-			// eran UI de Java y aca se ven blancas -- tapar con el splash de
-			// bg0. A partir del estado 2 (menu) el motor dibuja de verdad.
-			if (g_ui_status <= 1) splash_draw();
+			// eran UI de Java y aca se ven blancas -- tapar con el logo/titulo
+			// reales del APK. A partir del estado 2 (menu) el motor dibuja de verdad.
+			if (g_ui_status == 0) {
+				splash_draw(logo_tex);
+			} else if (g_ui_status == 1) {
+				splash_draw(title_tex);
+				touch_draw(frame);
+			}
 
 			// Intercambiar buffers en vitaGL
 			vglSwapBuffers(GL_FALSE);

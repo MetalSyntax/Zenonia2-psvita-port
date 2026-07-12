@@ -561,3 +561,242 @@ mapeados directo a newlib!—, `fstat` si apareciera) es sospechosa del mismo mi
 `localtime` devuelven `struct tm`, cuyo layout SÍ coincide entre bionic y newlib (ambos siguen el C
 estándar: 9 ints), así que esos están bien — pero verificar el layout antes de mapear cualquier import
 nuevo que devuelva o llene structs.
+
+## Fase 13: Splash/título reales del APK (no LiveArea) + aviso de touch + fix de un bug propio (2026-07-10/11)
+
+### 13.1 — El "splash" reutilizaba bg0.png de LiveArea, que no es fullscreen
+
+**Reporte del usuario:** el logo de Gamevil no se veía a pantalla completa, y después del logo la
+pantalla quedaba en blanco hasta apretar X para llegar al menú.
+
+**Causa:** `splash.rgba` (lo que `main.c` dibuja durante `g_ui_status` 0 y 1 — los estados que en Android
+eran Activities/Views de Java, invisibles para el motor nativo, ver §11.2) se había generado a partir de
+`sce_sys/livearea/contents/bg0.png` (840x500) — el fondo de LiveArea, que por las reglas de safe zone de
+la Vita tiene el logo real (480x320) achicado y centrado sobre bordes negros grandes. Confirmado
+inspeccionando los píxeles: el contenido no-negro ocupaba solo el rectángulo (240,112)-(716,428) de un
+canvas de 960x544 — una cuarta parte de la pantalla.
+
+**Solución:** en vez de reusar `bg0.png`, se generaron los `.rgba` directamente desde las imágenes reales
+del APK decompilado (`apk_extract/res/drawable/`):
+- `splash.rgba` ← `logo.png` (480x320, el logo real de Gamevil)
+- `title.rgba` (nuevo) ← `title.png` (800x480, la pantalla de título real)
+
+Ambas escaladas "cover" (mantener aspecto, recortar el sobrante) a 960x544 con Pillow:
+```python
+scale = max(tw/sw, th/sh)
+im = im.resize((round(sw*scale), round(sh*scale)), Image.LANCZOS).crop(<centrado a tw,th>)
+```
+Verificado que el contenido no-negro ahora cubre (0,0)-(956,540): pantalla completa.
+
+`loader/main.c`: `splash_load()` ahora carga dos texturas (antes una sola compartida): `logo_tex` para
+estado 0, `title_tex` para estado 1. `splash_draw()` recibe cuál dibujar. `load_rgba_tex()` reemplaza al
+loader anterior, parametrizado en ancho/alto para poder reusarlo con texturas de otro tamaño (ver 13.2).
+
+`CMakeLists.txt`: se agregó `FILE title.rgba title.rgba` al empaquetado del VPK.
+
+### 13.2 — El "queda en blanco hasta apretar X" en realidad era la falta del aviso "toca para continuar"
+
+Revisando el APK decompilado (`apk_decompiled/sources/com/gamevil/zenonia2/ui/Zenonia2UIControllerView.java`)
+se confirmó que en Android, durante el estado 1 (título), se muestra `touch.png` (258x25) centrado
+horizontalmente, a 3/4 de la altura de pantalla (`topMargin = displayHeight*3/4`), parpadeando cada 1s
+(`TouchViewTimeTask` → `showTouchViewAnim`, un `AlphaAnimation` de 0.0 a 0.1). Sin ese aviso, la pantalla
+de título en Vita no tenía ninguna pista visual de que había que apretar algo — de ahí la sensación de
+"queda en blanco" (en realidad ya mostraba el título real de 13.1, pero sin ningún indicio de qué hacer).
+
+**Solución:** `touch.rgba` (nuevo) generado desde `touch.png`, escalado 1.2x (mismo factor que
+`title.png`) a 310x30, preservando el canal alpha real de la imagen (transparente fuera del texto/ícono).
+Nueva función `touch_draw()` en `main.c`: dibuja el quad con blending real (`GL_BLEND` +
+`glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`) y un pulso de alpha vía `sinf()` (el fade original de
+Android era casi imperceptible, 0.0→0.1; acá se hizo más notorio a propósito para que cumpla su función
+de aviso). Se llama solo durante `g_ui_status == 1`, después de `splash_draw(title_tex)`.
+
+`CMakeLists.txt`: se agregó `FILE touch.rgba touch.rgba`.
+
+### 13.3 — Bug propio introducido: franja diagonal roja tras agregar el aviso de touch
+
+**Reporte del usuario:** tras instalar el VPK con el cambio de 13.2, apareció una capa roja diagonal
+cubriendo la pantalla que no existía antes.
+
+**Causa:** en `touch_draw()`, el array de vértices del quad (`verts`) se había declarado como variable
+local (stack), a diferencia de TODOS los demás vertex arrays del archivo (`splash_draw`, y el propio
+`uvs` de `touch_draw`), que son `static const`. vitaGL (GL1 sobre SCE GXM) no consume los client-side
+vertex arrays de forma inmediata en `glDrawArrays` — los referencia para el command buffer de GXM que se
+ejecuta más adelante en el frame. Para cuando la GPU efectivamente leía esos punteros, la memoria del
+stack de `touch_draw` ya estaba pisada por otras llamadas → vértices basura → un polígono gigante mal
+formado, visualmente una franja diagonal de colores al azar (tironeado hacia rojo por los canales que
+predominaban en la basura leída).
+
+**Solución:** `x`/`y` del quad pasaron de `const int` locales a macros (`TOUCH_TEX_X`/`TOUCH_TEX_Y`,
+constantes de tiempo de compilación), permitiendo declarar `verts` como `static const float[]` — mismo
+patrón que el resto del archivo.
+
+**Patrón para el futuro:** cualquier vertex/texcoord array pasado a `glVertexPointer`/`glTexCoordPointer`
+en este loader DEBE ser `static const` (o vivir en memoria que no muera al salir de la función) si sus
+valores no cambian entre frames. Si necesita variar por frame (ej. una posición animada), hay que
+recalcular dentro de un buffer `static` reusado, nunca en el stack.
+
+### 13.4 — 13.3 no era la causa real: la franja persistía en menú y juego (2026-07-11)
+
+**Reporte del usuario:** tras instalar el VPK con el fix de 13.3, la franja diagonal (roja a la izquierda,
+verde a la derecha) seguía apareciendo — y esta vez confirmado que ocurre tanto en el menú como durante el
+juego, no solo en la pantalla de título. El fix de 13.3 (vertex array `static`) era un bug real (y se deja
+aplicado, es el patrón correcto) pero no era la causa de lo que reportaba el usuario.
+
+**Causa real, encontrada cruzando el log (`[GL] ...`, `ENABLE_VERBOSE_JNI_LOG`/GL logging de `dynlib.c`)
+con el código de `touch_draw()`:** el motor nativo arma su textura compuesta de 400×240 (ver B.1) UNA vez
+al iniciar con `glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE)` y nunca lo vuelve a llamar por
+frame — confirmado en el log: esa llamada aparece solo una vez cerca del arranque, nunca de nuevo dentro
+del bucle de dibujo del quad compuesto (`glVertexPointer .../glColorPointer .../glDrawArrays` repetido
+cada frame con los mismos punteros `0x815ff1f0`/`0x815ff228`). Bajo `GL_REPLACE`, el color array
+por-vértice que el motor deja armado (`glColorPointer`, tipo `GL_UNSIGNED_BYTE`) es **irrelevante**: el
+fragmento sale directo de la textura, sin multiplicar por ningún color.
+
+`touch_draw()` (13.2) pone `GL_TEXTURE_ENV_MODE` en `GL_MODULATE` para que su pulso de alpha module la
+textura del aviso — necesario para ese efecto — pero nunca lo restauraba a `GL_REPLACE` al terminar. Como
+el motor no vuelve a tocar ese estado, `GL_MODULATE` quedaba activo para SIEMPRE desde el primer frame en
+que se dibuja el aviso de touch (estado 1) en adelante: el color por-vértice del motor (antes ignorado,
+con valores no pensados para modular nada) empezaba a multiplicarse contra la textura en todos los frames
+siguientes — incluido el menú y el juego. El compuesto se dibuja como 2 triángulos (`GL_TRIANGLES`,
+`count=6`), y un color por-vértice no uniforme entre ambos triángulos explica exactamente la franja
+diagonal roja/verde (el borde entre los dos triángulos).
+
+**Solución:** `touch_draw()` ahora restaura `glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE)`
+antes de retornar, dejando el estado global como el motor lo espera.
+
+**Patrón para el futuro:** igual que con los vertex arrays (13.3), cualquier estado GL global que el
+loader cambie para dibujar sus propios overlays (texEnv mode, blend func, color activo, etc.) y que el
+motor asuma fijo entre frames (no lo re-setea él mismo) DEBE restaurarse al valor que el motor espera
+antes de devolver el control al bucle principal — no alcanza con resetear solo lo que el propio overlay
+usó (`glColor4f`/`glDisable(GL_BLEND)` ya se reseteaban; faltaba el texEnv mode).
+
+### Próximo Paso Real (2026-07-11)
+1. Instalar el VPK con los cuatro fixes (logo/título reales, aviso de touch, vertex array `static`, texEnv
+   mode restaurado).
+2. Confirmar visualmente en consola: logo Gamevil a pantalla completa → título real con el aviso
+   parpadeante → X para pasar al menú → sin ninguna franja/artefacto de color en menú NI en juego.
+3. Si todo OK: sacar el logging de la build (pedido pendiente del usuario) y hacer el primer commit
+   acumulado (sigue sin commitear desde `ef7e0f3`).
+4. Retomar la Fase 12.4 (carga de partida guardada) y el táctil, que seguían pendientes de prueba.
+
+**CONFIRMADO en consola (2026-07-11):** ya no aparece la franja, ni en menú ni en juego. Fase 13 cerrada.
+
+## Fase 14: Shader de post-proceso (sharpen) — implementación experimental del Backlog B.1 (2026-07-11)
+
+**Pedido del usuario:** proceder con B.1 (mejorar nitidez vía shader de post-proceso, no reemplazo de
+assets), manteniendo la posibilidad de generar un VPK CON el shader y otro SIN él, para no arriesgar el
+build ya confirmado en consola (Fase 13).
+
+**Implementación:**
+- Nuevo `loader/postprocess.c`/`.h`: compila y linkea un par de shaders Cg (`glCreateShader`/
+  `glShaderSource`/`glCompileShader`/`glLinkProgram`, ya soportado por este build — `SceShaccCg_stub`/
+  `SceShaccCgExt`/`vitashark` ya estaban linkeados) que reemplazan, SOLO para el draw del blit del
+  compositor, el fixed-function `GL_REPLACE` por un sharpen (unsharp mask de 4 vecinos:
+  `color + (color - blur) * strength`, `strength = 0.6`).
+- El vertex shader hardcodea la ortho fija del motor (`glOrthof(-480,480,-272,272,-1,1)`, confirmada
+  constante en el log de arranque — nunca cambia entre frames) en vez de leer `state.matrix.mvp`: el
+  soporte de esa semantic en el compilador Cg embebido de vitaGL no está confirmado para este build, así
+  que se evita esa dependencia incierta directamente.
+- **Punto de enganche** (sin tocar la lógica del motor): `glTexImage2D_wrapper` guarda el tamaño real
+  (POT, 512×512 confirmado en log) de la textura RGB565 del compositor (`postprocess_set_source_size`,
+  usado para el uniform de texel size). `glTexSubImage2D_wrapper` marca el próximo `glDrawArrays` cuando
+  ve `w==400 && h==240` (firma única del blit del compositor, confirmada en log — es el único draw que
+  hace este motor, ver B.1). `glDrawArrays_wrapper` activa el programa (`postprocess_begin_draw`) antes
+  del `glDrawArrays` real y **lo desactiva inmediatamente después** (`postprocess_end_draw` →
+  `glUseProgram(0)`) para volver a fixed-function antes de que corra cualquier otra cosa — necesario
+  porque `splash_draw`/`touch_draw` (Fase 13) asumen fixed-function con `GL_REPLACE` y no saben nada de
+  shaders custom.
+- **Todos los call sites son incondicionales** (`main.c`/`dynlib.c` llaman a estas funciones siempre) —
+  la rama real vive detrás de `#ifdef POSTPROCESS_SHADER` en `postprocess.c`; sin esa macro, las 4
+  funciones son no-ops (`postprocess_begin_draw` devuelve 0 siempre). Esto es intencional: el build
+  default queda funcionalmente idéntico al ya confirmado en consola, sin ningún `#ifdef` esparcido en
+  `main.c`/`dynlib.c` que hubiera sido más fácil de romper por accidente.
+
+**CMake / build — generar los dos VPK:**
+- Nueva opción `ENABLE_POSTPROCESS_SHADER` (OFF por defecto) en `CMakeLists.txt`. ON define
+  `-DPOSTPROCESS_SHADER` y cambia el nombre del VPK de salida a `zenonia_2_shader.vpk` (vía `VPK_SUFFIX`)
+  para no pisar el `zenonia_2.vpk` normal.
+- `build.sh` ahora acepta un argumento de variante: `./build.sh normal` (default, igual que antes) o
+  `./build.sh shader` — cada uno usa su propio build dir (`/tmp/zenonia2-build` vs
+  `/tmp/zenonia2-build-shader`) para no mezclar objetos de una config con otra, y copia el `.vpk`
+  correspondiente a `build/`.
+- Verificado: ambas variantes **compilan y linkean** sin errores (`build/zenonia_2.vpk` y
+  `build/zenonia_2_shader.vpk` generados 2026-07-11).
+
+**Qué NO está confirmado todavía (pendiente de consola):** el código Cg (`VERT_SRC`/`FRAG_SRC` en
+`postprocess.c`) recién se compila DE VERDAD en tiempo de ejecución, vía `SceShaccCg`, en el hardware —
+la build cruzada de este repo solo verifica que el C wrapper linkea contra la API de vitaGL, no que el
+Cg en sí sea válido ni que el binding de atributos (`POSITION`/`TEXCOORD0` ↔ los arrays legacy
+`glVertexPointer`/`glTexCoordPointer` que ya usa el motor) funcione como se espera. `postprocess_init()`
+loguea el resultado de compilar/linkear (`[POSTPROCESS] ... compile FAILED: ...` / `link FAILED: ...` /
+`listo: program=...`) — **revisar el log de este build en consola** para confirmar que el shader
+efectivamente compiló antes de evaluar el resultado visual. Si falla la compilación, `postprocess_init`
+deja `pp_program = 0` y `postprocess_begin_draw` vuelve a devolver 0 (fixed-function normal, sin crash).
+
+**Próximo paso:** instalar `zenonia_2_shader.vpk` en consola (dejar `zenonia_2.vpk`, el build confirmado,
+sin tocar) y comparar el resultado visual + revisar el log en busca de errores de compilación/link del
+shader.
+
+### 14.1 — v1 daba pantalla negra desde el menú en adelante (2026-07-11)
+
+**Reporte del usuario:** con `zenonia_2_shader.vpk`, después del título, al entrar al menú se ve todo
+negro de ahí en más.
+
+**Diagnóstico:** el log mostró `[POSTPROCESS] vertex shader compiled OK` / `fragment shader compiled OK`
+/ `listo: program=1 loc_tex=... loc_texel=... loc_strength=...` — compiló y linkeó bien (los locations
+son valores grandes porque vitaGL los representa como punteros internos, no como índices chicos; no es
+un error). El problema no era la compilación sino el BINDING de atributos: la v1 reusaba los
+vertex/texcoord arrays legacy que arma el motor (`glVertexPointer`/`glTexCoordPointer`) asumiendo que
+vitaGL los bridgea automáticamente a los atributos `POSITION`/`TEXCOORD0` de un shader custom.
+Hipótesis más probable: el compilador Cg de vitaGL sigue la convención estándar de `ARB_vertex_program`
+(`POSITION`→`ATTR0`, pero `TEXCOORD0`→`ATTR8`, NO `ATTR1`) — que no necesariamente coincide con el índice
+al que vitaGL bridgea el `GL_TEXTURE_COORD_ARRAY` legacy. Si no coincide, el shader lee un texcoord
+basura/cero y muestrea siempre el mismo texel de la textura para toda la pantalla — que se ve como un
+color sólido (negro, si ese texel puntual resulta oscuro), aun con la geometría y la textura bien.
+
+**Fix (v2):** en vez de depender de ese bridging implícito, `postprocess_try_draw()` ahora dibuja **su
+propio** quad de pantalla completa con `glVertexAttribPointer`/`glBindAttribLocation` (API estándar, sin
+ambigüedad) usando geometría/UVs que ya se conocen constantes (el compositor siempre ocupa toda la
+pantalla, con el sub-rect 400×240 fijo dentro de la textura POT). Esto REEMPLAZA por completo el
+`glDrawArrays` original del motor para ese draw (antes solo lo envolvía) — mismo resultado visual +
+sharpen, sin ninguna dependencia de cómo vitaGL bridgea (o no) los arrays legacy.
+`postprocess_try_draw()` ahora devuelve 1 para indicarle a `glDrawArrays_wrapper` que se saltee su
+`glDrawArrays` original en ese caso.
+
+Ambas variantes vuelven a compilar y linkear sin error (verificado 2026-07-11, `zenonia_2_shader.vpk`
+regenerado). Sigue siendo experimental: la geometría propia (`glVertexAttribPointer`) es un mecanismo
+mucho más estándar/confiable que el bridging legacy, pero recién se confirma sirviendo en consola.
+
+**Próximo paso:** reinstalar `zenonia_2_shader.vpk` (v2) en consola y confirmar visualmente + revisar el
+log (debería aparecer `[POSTPROCESS] primer draw con shader (src=...)` una vez, al primer frame que
+activa el shader).
+
+## Backlog — Ideas para más adelante (NO implementar hasta confirmar que no quedan más bugs)
+
+### B.1 — Mejorar nitidez/resolución gráfica: shader de post-proceso, no reemplazo de assets (2026-07-11)
+
+**Pregunta del usuario:** ¿se puede mejorar la nitidez/resolución de los gráficos del juego?
+
+**Por qué reemplazar los assets originales (`.pzx`/`.ptc`/`.zt1`/`.mpl`) por versiones en mayor
+resolución NO serviría:** el motor renderiza todo **por software** — la propia lógica del juego
+compone los sprites en un buffer interno fijo de **400×240 RGB565**, y lo único que toca la GPU es esa
+imagen ya compuesta completa, subida cada frame como una sola textura (`glTexSubImage2D w=400 h=240`,
+ver §10.4/10.9) y estirada a pantalla completa con un quad (`GL_FIXED`/bilinear). No hay draw calls por
+sprite individual que se puedan interceptar ni texturas por-asset que reemplazar en caliente: todas las
+coordenadas de UI y del compositor interno (incluido el mapeo de touch a 400×240, ver §10.7) están
+calculadas asumiendo esa resolución fija. Subir la resolución de los assets fuente implicaría
+re-ingenierizar el compositor del motor (offsets, capas, hitboxes) — fuera de alcance y muy alto riesgo.
+
+**Vía realista y de bajo riesgo: shader de post-proceso en el blit final.** Ya existe un pipeline con
+shaders reales (`SceShaccCg`/`libshacccg.suprx`, usado por vitaGL) y un único punto de blit final (el
+quad que dibuja el frame de 400×240 estirado a 960×544, hoy con filtrado bilineal simple). Ahí se puede
+insertar un shader de upscaling tipo **xBR/hq4x** (los clásicos de emuladores retro en Vita) o un simple
+**sharpen**, sin tocar absolutamente nada de la lógica del juego ni del compositor — mismo patrón que
+usan los emuladores para mejorar contenido de baja resolución.
+
+**Trade-off a tener en cuenta cuando se implemente:** xBR/hq4x brilla en bordes duros de pixel art pero
+puede generar artefactos/ringing en degradados suaves (los fondos pintados a mano de Zenonia 2 tienen
+bastante de esto último) — probablemente valga la pena probar varias variantes (xBR, hq2x/hq4x, un
+sharpen simple tipo unsharp-mask) y comparar en consola antes de decidir cuál se queda.
+
+**Cuándo retomar:** recién después de confirmar que el VPK actual (Fase 13) no tiene más bugs visuales
+ni de gameplay pendientes — es una mejora cosmética opcional, no un fix.

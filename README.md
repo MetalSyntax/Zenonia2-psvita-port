@@ -2,6 +2,9 @@
 Zenonia 2 · PSVita Port
 </h1>
 <p align="center">
+  <img src="assets/Zenonia2.jpg" alt="Zenonia 2 PSVita Port">
+</p>
+<p align="center">
   <a href="#setup-instructions-for-players">How to install</a> •
   <a href="#controls">Controls</a> •
   <a href="#faq">FAQ</a> •
@@ -83,18 +86,15 @@ Controls
 
 |       Button        | Action                                  |
 |:-------------------:|:----------------------------------------|
-| ![joysl] / ![joysr] | Move                                    |
-| ![trigl] / ![trigr] |                                         |
-|      ![dpadh]       |                                         |
-|      ![dpadv]       |                                         |
-|      ![cross]       |                                         |
-|      ![circl]       |                                         |
-|      ![squar]       |                                         |
-|      ![trian]       |                                         |
-|      ![selec]       |                                         |
-|      ![start]       |                                         |
-| Accelerometer Tilt  |                                         |
-| Accelerometer Shake |                                         |
+| ![joysl] / ![dpadh] | Move (Left / Right)                     |
+|      ![dpadv]       | Move (Up / Down)                        |
+|      ![cross]       | Select / Confirm / Attack               |
+|      ![circl]       | Back / Menu                             |
+|      ![squar]       | Map                                     |
+|      ![trian]       | Quick Slot / Skip                       |
+|      ![trigl]       | Save                                    |
+| ![start] + ![selec] | Exit Game                               |
+|     Front Touch     | UI Navigation / Touch                   |
 
 FAQ
 ----------------
@@ -119,7 +119,9 @@ to help you.
 Known Issues
 ----------------
 
-N/A
+- **Blank Logo/Title Screens**: Upon starting the game, the initial logo and title screens may appear completely white. This is because those specific screens were originally rendered using Android Java UI elements rather than the native engine. You can simply tap the touch screen to advance past them and enter the game.
+- **Experimental Shader Build**: If you are using the experimental shader build (`zenonia_2_shader.vpk`), you might encounter a black screen after the menus. This feature is highly experimental and currently under active debugging. It is recommended to use the standard `zenonia_2.vpk` if you experience this.
+
 
 Build Instructions (For Developers)
 ----------------
@@ -189,8 +191,8 @@ the MIT license. See the [LICENSE](LICENSE) file for details.
 [fdfix]: https://github.com/TheOfficialFloW/FdFix/releases/
 [unpack-on-phone]: https://stackoverflow.com/questions/11012976/how-do-i-get-the-apk-of-an-installed-app-without-root-access
 [shrkbrd]: https://github.com/Rinnegatamante/ShaRKBR33D/releases/latest
-[latest-release]: https://github.com/v-atamanenko/deadspace-vita/releases/latest
-[issue]: https://github.com/v-atamanenko/deadspace-vita/issues/new
+[latest-release]: https://github.com/metalsyntax/zenonia2-vita/releases/latest
+[issue]: https://github.com/metalsyntax/zenonia2-vita/issues/new
 [dsmotion]: https://github.com/OperationNT414C/DSMotion/releases
 [ds4touch]: https://github.com/MERLev/ds4Touch/releases
 
