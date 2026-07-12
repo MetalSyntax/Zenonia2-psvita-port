@@ -229,16 +229,31 @@ def download_latest_debug_files():
         except:
             pass
 
+def run_clean_macos():
+    print("[*] Ejecutando clean_macos_files.sh...")
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clean_macos_files.sh")
+    if os.path.exists(script_path):
+        try:
+            subprocess.run(["bash", script_path], check=True)
+            print("[+] clean_macos_files.sh ejecutado exitosamente.")
+        except subprocess.CalledProcessError as e:
+            print(f"[-] Error al ejecutar clean_macos_files.sh: {e}")
+        except Exception as e:
+            print(f"[-] Ocurrió un error inesperado: {e}")
+    else:
+        print(f"[-] Error: No se encontró el script en '{script_path}'.")
+
 def main():
     while True:
         print_banner()
         print("1. Subir VPK compilado a la PS Vita (ux0:downloads/)")
         print("2. Descargar el último dump (.dmp) y el último log (.txt) a la carpeta actual")
         print("3. Desconectar Proton VPN ahora mismo")
-        print("4. Salir")
+        print("4. Ejecutar clean_macos_files.sh (limpiar archivos ocultos de macOS)")
+        print("5. Salir")
         print("====================================================")
         try:
-            opcion = input("Elige una opción (1-4): ").strip()
+            opcion = input("Elige una opción (1-5): ").strip()
             print()
             if opcion == "1":
                 upload_vpk()
@@ -247,6 +262,8 @@ def main():
             elif opcion == "3":
                 disconnect_proton_vpn()
             elif opcion == "4":
+                run_clean_macos()
+            elif opcion == "5":
                 print("¡Hasta luego!")
                 break
             else:
