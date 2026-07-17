@@ -43,7 +43,7 @@ endif()
 ## documents this exact setting (FALSOJNI_DEBUGLEVEL=0) making the game
 ## unplayably slow, since every JNI call pays a full file open+write+close.
 ## Turn ON only to debug a specific boot issue, then back OFF.
-option(ENABLE_VERBOSE_JNI_LOG "Log every FalsoJNI call (debug only, slow)" ON)
+option(ENABLE_VERBOSE_JNI_LOG "Log every FalsoJNI call (debug only, slow)" OFF)
 if (ENABLE_VERBOSE_JNI_LOG)
   add_definitions(-DFALSOJNI_DEBUGLEVEL=0)
 endif()

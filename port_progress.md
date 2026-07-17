@@ -770,6 +770,80 @@ mucho más estándar/confiable que el bridging legacy, pero recién se confirma 
 log (debería aparecer `[POSTPROCESS] primer draw con shader (src=...)` una vez, al primer frame que
 activa el shader).
 
+## Fase 15: Rendimiento — de ~22 FPS a clocks máximos + sin log verboso por frame (2026-07-16)
+
+**Reporte del usuario:** el juego corre a ~22 FPS, objetivo 30 sostenido.
+
+**Hallazgo #1 (el más probable culpable): `ENABLE_VERBOSE_JNI_LOG` quedó en `ON` por defecto en
+`CMakeLists.txt`.** El comentario que está justo arriba de esa opción ya documentaba el riesgo citando
+el propio `Fixes_Log.md` del port de Prince of Persia: con `FALSOJNI_DEBUGLEVEL=0` (ALL), **cada** llamada
+JNI (`GetMethodID`, `CallVoidMethod`, etc. — hay 271 sitios de log en `lib/falso_jni/`) pasa por
+`game_log()`, que hace `fprintf` + `fflush()` a un archivo en `ux0:data/.../logs/` en cada llamada (ver
+`init_log()`/`game_log()` en `loader/main.c`). El motor dispara JNI varias veces por frame (render,
+sonido, eventos clet), y `fflush()` fuerza una sincronización a la tarjeta de memoria/almacenamiento en
+cada una — exactamente el patrón que ese Fixes_Log describe como "unplayably slow". `build.sh` nunca
+pasaba `-DENABLE_VERBOSE_JNI_LOG`, así que el build "normal" ya confirmado en consola se compilaba
+igual con el logging verboso encendido. **Fix:** el default de la opción en `CMakeLists.txt` pasa a
+`OFF` (se puede volver a encender puntualmente con `-DENABLE_VERBOSE_JNI_LOG=ON` para depurar un boot
+específico, como ya decía el comentario original).
+
+**Hallazgo #2: nunca se subían los clocks de CPU/bus/GPU.** No había ningún llamado a `scePowerSet*` en
+todo el codebase (`ScePower_stub` ya estaba linkeado en `CMakeLists.txt` pero sin uso). Por defecto la
+Vita corre a 333MHz CPU / 111MHz bus / 166MHz GPU. Dado que el motor compone todo el frame **por
+software** en un buffer de 400×240 (ver Backlog B.1 más abajo — la GPU solo hace un blit final), el
+cuello de botella es CPU-bound, así que este boost es exactamente el que más rinde. **Fix:** en
+`main()` (`loader/main.c`), antes de `init_log()`:
+```c
+scePowerSetArmClockFrequency(444);
+scePowerSetBusClockFrequency(222);
+scePowerSetGpuClockFrequency(166);
+scePowerSetGpuXbarClockFrequency(166);
+```
+Mismo boost estándar usado por PPSSPP y la gran mayoría de homebrews/ports en Vita; sin downside
+conocido en hardware real más allá de mayor consumo/calor.
+
+Ambos cambios compilan limpio (`./build.sh normal`, verificado 2026-07-16).
+
+### 15.1 — Usuario reporta "más zoom" en toda la pantalla tras probar en consola (2026-07-16)
+
+Usuario instaló el VPK con ambos fixes y confirmó: **FPS mejoró notablemente (más fluido)**, pero
+**toda la pantalla se ve con más zoom que antes** (no solo el juego, ni solo splash — "en general").
+
+**Análisis:** ninguno de los dos cambios toca resolución/viewport/proyección:
+- El fix de logging (hallazgo #1) solo cambia qué líneas se loguean (`_fjni_log_debug` queda silenciado
+  al pasar de nivel 0/ALL a nivel 1/INFO por defecto) — no altera ningún valor de retorno ni control de
+  flujo de las funciones JNI, así que no puede afectar renderizado.
+- El boost de clocks (hallazgo #2) solo cambia velocidad de CPU/bus/GPU — no hay mecanismo conocido de
+  la SDK por el que esto cambie escala/zoom de nada.
+
+**Hipótesis más probable:** el motor corre notablemente más rápido/fluido ahora, y puede tener alguna
+transición de cámara (p.ej. un zoom-in de apertura) atada a un contador de frames en vez de a tiempo
+real — antes, con el loop trabado a ~22FPS por los `fflush()` de hallazgo #1, esa transición podía no
+llegar nunca a completarse en el tiempo que el usuario miraba la pantalla; ahora sí llega a su estado
+final. Osea, no necesariamente una regresión nueva sino una animación completando por primera vez. No
+confirmado — no hay ninguna referencia a "zoom" ni en el Java decompilado (`apk_decompiled/`, todo el
+juego real es nativo) ni en el loader (`loader/*.c` no tiene lógica de zoom, solo `image_load.c` que
+escala splash/logo/título con un factor FIJO calculado una sola vez al boot, sin relación a FPS).
+
+**Acción tomada (bisección):** revertido el boost de clocks (hallazgo #2) — las 4 líneas
+`scePowerSet*Frequency` en `main()` y el `#include <psp2/power.h>` — dejando SOLO el fix de logging
+(hallazgo #1), que por lo de arriba no debería poder causar esto y ya de por sí es una mejora de
+rendimiento real.
+
+### 15.2 — Idas y vueltas: revertido, luego restaurado y commiteado a pedido del usuario (2026-07-16)
+
+Tras el reporte de "más zoom" (15.1) el usuario pidió revertir todo, incluido el fix de logging —
+llegó a decirse en este mismo historial que Fase 15 quedaba cerrada sin cambios de código. Sin embargo,
+en la misma sesión el usuario pidió explícitamente **restaurar ambos fixes (logging OFF + boost de
+clocks) y commitearlos**, así que quedan aplicados: `ENABLE_VERBOSE_JNI_LOG` en `OFF` en
+`CMakeLists.txt` y los 4 `scePowerSet*Frequency` en `main()` (`loader/main.c`).
+
+**Estado real, sin resolver:** la causa del "más zoom en toda la pantalla" reportado en 15.1 nunca se
+confirmó ni se descartó — no se llegó a aislar cuál de los dos fixes (o si fue una tercera variable) lo
+causaba, porque el usuario pidió revertir antes de terminar esa bisección. Al restaurar ambos fixes tal
+cual, **el problema de zoom podría reaparecer** — si eso pasa, retomar la bisección de 15.1 (probar cada
+fix por separado) en vez de asumir que ya se descartó.
+
 ## Backlog — Ideas para más adelante (NO implementar hasta confirmar que no quedan más bugs)
 
 ### B.1 — Mejorar nitidez/resolución gráfica: shader de post-proceso, no reemplazo de assets (2026-07-11)
