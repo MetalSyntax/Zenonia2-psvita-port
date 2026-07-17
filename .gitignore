@@ -52,4 +52,5 @@ log_*.txt
 
 # Legacy / external files
 PS Vita
-
+zenonia2_translation/
+tools/

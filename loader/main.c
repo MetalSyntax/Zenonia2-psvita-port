@@ -21,6 +21,7 @@
 #include "so_util.h"
 #include "audio.h"
 #include "postprocess.h"
+#include "image_load.h"
 #include <taihen.h>
 #include <vitaGL.h>
 #include <falso_jni/FalsoJNI.h>
@@ -214,43 +215,29 @@ static void apply_so_patches(so_module *mod) {
 // de tocar/apretar por su cuenta. g_ui_status lo actualiza java.c. ---
 extern volatile int g_ui_status;
 
+// logo.png/title.png/touch.png se leen tal cual vienen de
+// apk_extract/res/drawable -- deployadas aparte por FTP (ver manage_vita.py)
+// bajo ux0:data/zenonia-2/drawable/, no empaquetadas en el VPK -- y se
+// decodifican/escalan en el dispositivo (ver image_load.c) en vez de leer
+// los .rgba crudos pre-generados que este reemplaza.
+#define DRAWABLE_DIR "ux0:data/zenonia-2/drawable"
+
 static GLuint logo_tex = 0;
 static GLuint title_tex = 0;
 static GLuint touch_tex = 0;
-// touch.rgba se genero escalando touch.png (258x25) por el mismo factor
-// "cover" que title.rgba (800x480 -> 960x544, factor 1.2x) para que se vea
-// consistente con el arte del titulo.
+// touch.png se escala por el mismo factor "cover" que title.png (800x480 ->
+// 960x544, factor 1.2x) en vez de un cover-fit propio calculado de su
+// aspecto, para que se vea consistente con el arte del titulo.
+#define TITLE_COVER_SCALE 1.2f
 #define TOUCH_TEX_W 310
 #define TOUCH_TEX_H 30
 #define TOUCH_TEX_X ((960 - TOUCH_TEX_W) / 2)
 #define TOUCH_TEX_Y ((544 * 3) / 4)
 
-static GLuint load_rgba_tex(const char *path, int w, int h) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        game_log("splash: %s no encontrado\n", path);
-        return 0;
-    }
-    size_t size = (size_t)w * h * 4;
-    void *data = malloc(size);
-    if (!data) { fclose(f); return 0; }
-    fread(data, 1, size, f);
-    fclose(f);
-
-    GLuint tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    free(data);
-    return tex;
-}
-
 static void splash_load(void) {
-    logo_tex = load_rgba_tex("app0:splash.rgba", 960, 544);
-    title_tex = load_rgba_tex("app0:title.rgba", 960, 544);
-    touch_tex = load_rgba_tex("app0:touch.rgba", TOUCH_TEX_W, TOUCH_TEX_H);
+    logo_tex = image_load_png_tex(DRAWABLE_DIR "/logo.png", 960, 544, 0.0f);
+    title_tex = image_load_png_tex(DRAWABLE_DIR "/title.png", 960, 544, 0.0f);
+    touch_tex = image_load_png_tex(DRAWABLE_DIR "/touch.png", TOUCH_TEX_W, TOUCH_TEX_H, TITLE_COVER_SCALE);
 }
 
 // Se dibuja DESPUES de NativeRender (tapa el blanco del motor) preservando las

@@ -100,6 +100,7 @@ add_executable(${PROJECT_NAME}
   ./loader/java.c
   ./loader/audio.c
   ./loader/postprocess.c
+  ./loader/image_load.c
   ./common/debugScreen.c
   ./lib/falso_jni/FalsoJNI.c
   ./lib/falso_jni/FalsoJNI_ImplBridge.c
@@ -154,13 +155,10 @@ else()
     FILE sce_sys/livearea/contents/bg0.png sce_sys/livearea/contents/bg0.png
     FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
     FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
-    # Splash/titulo en crudo (960x544 RGBA8888, generados desde logo.png/title.png
-    # del APK original, escalados a pantalla completa) que el loader muestra en
-    # vez de la pantalla blanca de logo/titulo (ver splash_* en main.c). touch.rgba
-    # (310x30) es el aviso "toca para continuar" que Android parpadeaba sobre el
-    # titulo (Zenonia2UIControllerView.showTouchViewAnim).
-    FILE splash.rgba splash.rgba
-    FILE title.rgba title.rgba
-    FILE touch.rgba touch.rgba
+    # logo.png/title.png/touch.png (splash/titulo/aviso "toca para continuar"
+    # que el loader dibuja en vez de la pantalla blanca de logo/titulo, ver
+    # splash_* en main.c) ya NO se empaquetan en el VPK: se decodifican en el
+    # dispositivo desde ux0:data/zenonia-2/drawable/, deployado por FTP igual
+    # que el resto de los assets (ver manage_vita.py e INSTALL.md).
   )
 endif()

@@ -51,8 +51,9 @@ onward (see `port_progress.md` Fase 14.1) — do not assume it works without che
 ## Deploying / testing
 
 - `manage_vita.py` — interactive menu to FTP a built VPK to a real Vita (VitaShell FTP server must be
-  running), and to pull back the latest crash dump (`psp2core*`) + log file for analysis. Hardcoded
-  `VITA_IP`; edit before running on a different network.
+  running), to FTP just the splash/title/touch PNGs (`ux0_data/zenonia-2/drawable/`, see below) without
+  re-copying the rest of the assets, and to pull back the latest crash dump (`psp2core*`) + log file for
+  analysis. Hardcoded `VITA_IP`; edit before running on a different network.
 - Game data assets (from the extracted APK) live under `ux0_data/zenonia-2/` in this repo and must be
   copied to `ux0:data/zenonia-2/` on the target (real Vita or Vita3K's virtual `ux0`) separately from
   installing the VPK — see `INSTALL.md` for exact paths for both targets.
@@ -96,6 +97,8 @@ onward (see `port_progress.md` Fase 14.1) — do not assume it works without che
    Android SoundPool/MediaPlayer semantics.
 6. **`postprocess.c`/`.h`** — optional post-process shader path, see "Two build variants" above. Behind
    `#ifdef POSTPROCESS_SHADER`; the non-shader build compiles this file down to no-ops.
+7. **`image_load.c`/`.h`** — PNG decode + cover-fit resize for the splash/title/touch overlays, see
+   "Supporting pieces" below.
 
 ### Supporting pieces
 
@@ -111,17 +114,24 @@ onward (see `port_progress.md` Fase 14.1) — do not assume it works without che
   active.
 - **`sce_sys/`** — LiveArea assets (icons, background, bubble metadata) bundled into the VPK by
   `vita_create_vpk` in `CMakeLists.txt`.
-- **`splash.rgba`/`title.rgba`/`touch.rgba`** — pre-rendered fullscreen RGBA8888 frames (generated from
-  the APK's own logo/title/touch-prompt PNGs) that `main.c` draws over the engine's blank output during
-  its Java-UI-only logo/title states (`g_ui_status` 0/1) — those two screens were originally drawn by
-  Android Java UI, which doesn't exist in this environment, so the engine renders nothing without them.
+- **`loader/image_load.c`/`.h`** — decodes `logo.png`/`title.png`/`touch.png` (the APK's own
+  logo/title/touch-prompt drawables, read at runtime from `ux0:data/zenonia-2/drawable/`, *not* bundled
+  in the VPK — see `ux0_data/zenonia-2/` below) with `stb_image` (vendored in `lib/stb/`, PNG-only) and
+  resamples them with a bilinear "cover" fit (scale to fill the destination box, crop the overflowing
+  axis) to the exact frames `main.c`'s `splash_load()`/`splash_draw()` draw over the engine's blank output
+  during its Java-UI-only logo/title states (`g_ui_status` 0/1) — those two screens were originally drawn
+  by Android Java UI, which doesn't exist in this environment, so the engine renders nothing without
+  them. This replaced an earlier approach of shipping pre-baked `splash.rgba`/`title.rgba`/`touch.rgba`
+  raw frames inside the VPK.
 - **`apk_extract/` / `apk_decompiled/`** — the original APK's raw contents and a `jadx` decompilation of
   its Java layer. This is the ground truth for JNI method signatures, resource IDs (e.g. sound ID → file
   mapping), and UI/input behavior being replicated natively — consult these before guessing at engine
   behavior. `output/out_ghidra.c`/`.h` is a Ghidra decompilation of `libzenonia2.so` itself, used the same
   way for native-side behavior (e.g. locating the `CMvLayerData::PreLoad` patch site).
 - **`ux0_data/zenonia-2/`** — the runtime asset tree deployed separately from the VPK (see Deploying
-  above); not compiled into the app.
+  above); not compiled into the app. Includes `assets/` and `sound/` (the game's own data) plus
+  `drawable/` (the three splash-screen PNGs `image_load.c` reads, copied from `apk_extract/res/drawable/`
+  — see above).
 
 ## Project history / where to look first
 
@@ -140,7 +150,9 @@ to recur in this or similar Android→Vita ports.
 
 ## Known issues (current)
 
-- Logo/title screens are covered by static pre-rendered splash images (see `splash.rgba` note above)
-  rather than fixed at the engine level, since those were originally Java UI screens.
+- Logo/title screens are covered by splash images decoded from PNG at runtime (see `image_load.c` note
+  above) rather than fixed at the engine level, since those were originally Java UI screens. If
+  `ux0:data/zenonia-2/drawable/` wasn't deployed, these screens fall back to the engine's blank output
+  (logged as "no encontrado", non-fatal).
 - The experimental postprocess shader build (`zenonia_2_shader.vpk`) currently produces a black screen
   from the menu onward — do not treat it as a working alternative to the standard build.

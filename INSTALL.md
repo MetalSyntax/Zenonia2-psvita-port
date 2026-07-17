@@ -4,7 +4,11 @@ Esta guía explica detalladamente cómo instalar el port de Zenonia 2, tanto en 
 
 El juego requiere **dos componentes principales** para funcionar correctamente:
 1. El instalador ejecutable (`build/zenonia_2.vpk`).
-2. Los datos y recursos gráficos extraídos (`ux0_data/zenonia-2/`).
+2. Los datos y recursos gráficos extraídos (`ux0_data/zenonia-2/`), que incluyen `drawable/`
+   (logo.png/title.png/touch.png de la pantalla de splash/título, ver `loader/main.c`) además de
+   `assets/` y `sound/`. Ya no van embebidos en el VPK: si copiás todo el contenido de `ux0_data/`
+   como se indica abajo quedan incluidos automáticamente; `manage_vita.py` (opción 5) también permite
+   subir solo esos tres PNG por FTP sin tocar el resto de los assets.
 
 ---
 

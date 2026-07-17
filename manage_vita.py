@@ -11,6 +11,12 @@ LOCAL_VPK_PATH = "build/zenonia_2.vpk"
 VITA_DOWNLOADS_DIR = "/ux0:/downloads"
 VITA_DATA_DIR = "/ux0:/data"
 VITA_LOGS_DIR = "/ux0:/data/zenonia-2/logs"
+LOCAL_DRAWABLE_DIR = "apk_extract/res/drawable"
+VITA_DRAWABLE_DIR = "/ux0:/data/zenonia-2/drawable"
+# Los unicos PNG que el loader lee en tiempo de ejecucion (ver DRAWABLE_DIR en
+# loader/main.c); el resto de res/drawable (banner/icon170/news/rate) son
+# recursos de la app Android original sin uso en el port.
+DRAWABLE_FILES = ["logo.png", "title.png", "touch.png"]
 
 def print_banner():
     print("====================================================")
@@ -138,6 +144,38 @@ def upload_vpk():
         except:
             pass
 
+def upload_drawable_assets():
+    missing = [f for f in DRAWABLE_FILES if not os.path.exists(os.path.join(LOCAL_DRAWABLE_DIR, f))]
+    if missing:
+        print(f"[-] Error: no se encontraron en '{LOCAL_DRAWABLE_DIR}': {', '.join(missing)}")
+        return
+
+    # Desconectar VPN antes de transferir
+    disconnect_proton_vpn()
+
+    ftp = connect_ftp()
+    if not ftp:
+        return
+
+    try:
+        create_directory_if_not_exists(ftp, VITA_DRAWABLE_DIR)
+
+        for filename in DRAWABLE_FILES:
+            local_path = os.path.join(LOCAL_DRAWABLE_DIR, filename)
+            dest_file_path = f"{VITA_DRAWABLE_DIR}/{filename}"
+            print(f"[*] Subiendo {local_path} a {dest_file_path}...")
+            with open(local_path, "rb") as f:
+                ftp.storbinary(f"STOR {dest_file_path}", f)
+
+        print(f"[+] Transferencia exitosa! El loader los leera desde 'ux0:data/zenonia-2/drawable/'.")
+    except all_errors as e:
+        print(f"[-] Falló la transferencia de los assets drawable: {e}")
+    finally:
+        try:
+            ftp.quit()
+        except:
+            pass
+
 def download_latest_debug_files():
     # Desconectar VPN antes de transferir
     disconnect_proton_vpn()
@@ -250,10 +288,11 @@ def main():
         print("2. Descargar el último dump (.dmp) y el último log (.txt) a la carpeta actual")
         print("3. Desconectar Proton VPN ahora mismo")
         print("4. Ejecutar clean_macos.sh (limpiar archivos ocultos de macOS)")
-        print("5. Salir")
+        print("5. Subir logo/title/touch.png (apk_extract/res/drawable) a ux0:data/zenonia-2/drawable/")
+        print("6. Salir")
         print("====================================================")
         try:
-            opcion = input("Elige una opción (1-5): ").strip()
+            opcion = input("Elige una opción (1-6): ").strip()
             print()
             if opcion == "1":
                 upload_vpk()
@@ -264,6 +303,8 @@ def main():
             elif opcion == "4":
                 run_clean_macos()
             elif opcion == "5":
+                upload_drawable_assets()
+            elif opcion == "6":
                 print("¡Hasta luego!")
                 break
             else:
