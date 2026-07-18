@@ -11,8 +11,9 @@ Thumbs.db
 __pycache__/
 *.pyc
 
-# Build files
-build/
+# Build files (repo-root CMake output dir only -- porting_tools/build/ holds
+# real source scripts, not build output)
+/build/
 CMakeCache.txt
 CMakeFiles/
 Makefile
