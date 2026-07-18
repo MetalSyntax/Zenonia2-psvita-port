@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <stdarg.h>
 
+#include <arm_neon.h>
 #include <vitaGL.h>
 #include "so_util.h"
 #include "postprocess.h"
@@ -31,30 +32,69 @@ void glTexParameterx_wrapper(GLenum target, GLenum pname, int param) {
     glTexParameteri(target, pname, param);
 }
 
+// Buffer reusado entre llamadas -- esta conversion corre una vez por frame
+// (el blit del compositor 400x240, ver glTexSubImage2D_wrapper) y antes hacia
+// malloc()+free() de ~384KB en cada una, agregando churn de heap justo en el
+// hot path de render. Nunca se libera; crece con realloc solo si hace falta
+// mas espacio (una textura RGB565 mas grande que la vista hasta ahora).
+static uint8_t *rgba_conv_buf = NULL;
+static size_t rgba_conv_buf_cap = 0;
+
 void *convert_rgb565_to_rgba8888(const void *pixels, int width, int height) {
     if (!pixels) return NULL;
-    uint16_t *src = (uint16_t *)pixels;
-    uint8_t *dst = (uint8_t *)malloc(width * height * 4);
-    
-    uint16_t min_p = 0xFFFF, max_p = 0x0000;
-    
-    for (int i = 0; i < width * height; i++) {
+
+    size_t count = (size_t)width * (size_t)height;
+    size_t needed = count * 4;
+    if (needed > rgba_conv_buf_cap) {
+        rgba_conv_buf = (uint8_t *)realloc(rgba_conv_buf, needed);
+        rgba_conv_buf_cap = needed;
+    }
+
+    const uint16_t *src = (const uint16_t *)pixels;
+    uint8_t *dst = rgba_conv_buf;
+
+    // Expansion 5/6-bit -> 8-bit vectorizada con NEON, 8 pixeles por
+    // iteracion. Formula multiply-add-shift (bit-replication) en vez de la
+    // division escalar original: mismo resultado +/-1 LSB (imperceptible),
+    // sin instruccion de division y vectorizable en registros de 16 bits sin
+    // overflow (31*527+23=16360 y 63*259+33=16350, ambos caben en 16 bits).
+    const uint16x8_t mask5 = vdupq_n_u16(0x1F);
+    const uint16x8_t mask6 = vdupq_n_u16(0x3F);
+    const uint16x8_t add5 = vdupq_n_u16(23);
+    const uint16x8_t add6 = vdupq_n_u16(33);
+
+    size_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        uint16x8_t pix = vld1q_u16(src + i);
+
+        uint16x8_t r5 = vshrq_n_u16(pix, 11);
+        uint16x8_t g6 = vandq_u16(vshrq_n_u16(pix, 5), mask6);
+        uint16x8_t b5 = vandq_u16(pix, mask5);
+
+        uint16x8_t r8 = vshrq_n_u16(vmlaq_n_u16(add5, r5, 527), 6);
+        uint16x8_t g8 = vshrq_n_u16(vmlaq_n_u16(add6, g6, 259), 6);
+        uint16x8_t b8 = vshrq_n_u16(vmlaq_n_u16(add5, b5, 527), 6);
+
+        uint8x8x4_t rgba;
+        rgba.val[0] = vmovn_u16(r8);
+        rgba.val[1] = vmovn_u16(g8);
+        rgba.val[2] = vmovn_u16(b8);
+        rgba.val[3] = vdup_n_u8(255);
+        vst4_u8(dst + i * 4, rgba);
+    }
+
+    // Remanente (count no multiplo de 8) con la misma formula, escalar.
+    for (; i < count; i++) {
         uint16_t p = src[i];
-        if (p < min_p) min_p = p;
-        if (p > max_p) max_p = p;
-        
-        dst[i*4 + 0] = ((p >> 11) & 0x1F) * 255 / 31; // R
-        dst[i*4 + 1] = ((p >> 5) & 0x3F) * 255 / 63;  // G
-        dst[i*4 + 2] = (p & 0x1F) * 255 / 31;         // B
-        dst[i*4 + 3] = 255;                           // A
+        uint16_t r5 = (p >> 11) & 0x1F;
+        uint16_t g6 = (p >> 5) & 0x3F;
+        uint16_t b5 = p & 0x1F;
+        dst[i * 4 + 0] = (uint8_t)((r5 * 527 + 23) >> 6);
+        dst[i * 4 + 1] = (uint8_t)((g6 * 259 + 33) >> 6);
+        dst[i * 4 + 2] = (uint8_t)((b5 * 527 + 23) >> 6);
+        dst[i * 4 + 3] = 255;
     }
-    
-    static int conv_log = 0;
-    if (conv_log < 10) {
-        game_log("[GL] convert_rgb565_to_rgba8888: min=%04x max=%04x\n", min_p, max_p);
-        conv_log++;
-    }
-    
+
     return dst;
 }
 
@@ -77,9 +117,21 @@ void glTexImage2D_wrapper(GLenum target, GLint level, GLint internalformat, GLsi
         // opcional necesita el tamaño real de este POT para su uniform de
         // texel size -- ver postprocess.c.
         postprocess_set_source_size(width, height);
+#ifdef NATIVE_RGB565_TEST
+        // Experimento Fase 18: subir RGB565 nativo, sin convertir. Si vitaGL
+        // sigue sin soportarlo, el chequeo glGetError() de mas abajo va a
+        // loguear GL_INVALID_ENUM (0x500) -- exactamente la señal que
+        // confirma/descarta esto sin ambiguedad.
+        static int native_log = 0;
+        if (native_log < 5) {
+            game_log("[GL][RGB565-TEST] glTexImage2D nativo (sin conversion): w=%d h=%d\n", width, height);
+            native_log++;
+        }
+        glTexImage2D(target, level, GL_RGB, width, height, border, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, pixels);
+#else
         void *new_pixels = convert_rgb565_to_rgba8888(pixels, width, height);
         glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, new_pixels);
-        if (new_pixels) free(new_pixels);
+#endif
     } else {
         glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
     }
@@ -109,9 +161,17 @@ void glTexSubImage2D_wrapper(GLenum target, GLint level, GLint xoffset, GLint yo
         // en log) -- marcarlo para que el proximo glDrawArrays use el shader
         // de post-proceso opcional en vez de fixed-function GL_REPLACE.
         if (width == 400 && height == 240) postprocess_mark_next_draw();
+#ifdef NATIVE_RGB565_TEST
+        static int native_sub_log = 0;
+        if (native_sub_log < 5) {
+            game_log("[GL][RGB565-TEST] glTexSubImage2D nativo (sin conversion): w=%d h=%d\n", width, height);
+            native_sub_log++;
+        }
+        glTexSubImage2D(target, level, xoffset, yoffset, width, height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, pixels);
+#else
         void *new_pixels = convert_rgb565_to_rgba8888(pixels, width, height);
         glTexSubImage2D(target, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, new_pixels);
-        if (new_pixels) free(new_pixels);
+#endif
     } else {
         glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
     }

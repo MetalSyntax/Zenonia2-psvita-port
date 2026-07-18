@@ -122,6 +122,17 @@ Known Issues
 - **Blank Logo/Title Screens**: Upon starting the game, the initial logo and title screens may appear completely white. This is because those specific screens were originally rendered using Android Java UI elements rather than the native engine. You can simply tap the touch screen to advance past them and enter the game.
 - **Experimental Shader Build**: If you are using the experimental shader build (`zenonia_2_shader.vpk`), you might encounter a black screen after the menus. This feature is highly experimental and currently under active debugging. It is recommended to use the standard `zenonia_2.vpk` if you experience this.
 
+Current Recommended Build (Testers)
+----------------
+
+The most stable build tested so far is `build/zenonia_2_rgb565test.vpk`, built with
+`ENABLE_NATIVE_RGB565_TEST=ON` (see [CMakeLists.txt](CMakeLists.txt) / `./build.sh rgb565test`). It bundles
+all the latest performance fixes on top of the confirmed-working native RGB565 texture upload path (no
+more CPU-side RGB565→RGBA8888 conversion): the audio mixer no longer blocks the render thread, and the
+framerate is capped to a steady ~30 FPS with real VSync (no tearing). This build has not been promoted to
+a numbered [Release][latest-release] yet — see `port_progress.md` (Fases 16–19) for full details on each
+fix and its current confirmation status.
+
 
 Build Instructions (For Developers)
 ----------------

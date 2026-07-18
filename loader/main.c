@@ -375,6 +375,17 @@ void gl_init() {
   // the Vita's native resolution, never falls back) is the expected, healthy
   // result. Do not treat it as an init failure.
   vglInitExtended(0, 960, 544, 6 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
+
+  // Cap a ~30 FPS con VSync real (sin tearing): la Vita refresca a ~59.94Hz,
+  // asi que interval=2 espera 2 vblanks por swap en vez de 1 (que daria un
+  // cap a ~60 FPS via vglWaitVblankStart). Sin este cap, con el compositor
+  // por-software corriendo mas rapido que antes (boost de clocks Fase 15 +
+  // conversion RGB565 optimizada Fase 16.1), el motor llegaba a ~40 FPS
+  // sostenidos -- mas rapido que el ritmo original (30 FPS, hardware Android
+  // de 2011) para el que esta calibrada la logica de juego, y sin VSync
+  // (tearing visible en el blit del compositor).
+  eglSwapInterval(eglGetDisplay(EGL_DEFAULT_DISPLAY), 2);
+
   gl_active = 1;
 }
 

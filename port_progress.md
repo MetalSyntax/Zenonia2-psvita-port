@@ -804,45 +804,212 @@ conocido en hardware real más allá de mayor consumo/calor.
 
 Ambos cambios compilan limpio (`./build.sh normal`, verificado 2026-07-16).
 
-### 15.1 — Usuario reporta "más zoom" en toda la pantalla tras probar en consola (2026-07-16)
+### 15.1 — [INVALIDADO] Reporte de "más zoom" fue un error de prompt, nunca existió tal bug (2026-07-16)
 
-Usuario instaló el VPK con ambos fixes y confirmó: **FPS mejoró notablemente (más fluido)**, pero
-**toda la pantalla se ve con más zoom que antes** (no solo el juego, ni solo splash — "en general").
+Se había registrado acá un reporte de "más zoom en toda la pantalla" tras instalar el build con ambos
+fixes, seguido de una bisección (revertir boost de clocks, dejar solo el fix de logging) para intentar
+aislar la causa. **El usuario aclaró después que ese reporte fue un error de prompt: ese bug de zoom
+nunca existió en este port.** No hay nada que investigar ni biseccionar — se deja esta nota para que
+una sesión futura no retome una investigación sobre un problema inexistente.
 
-**Análisis:** ninguno de los dos cambios toca resolución/viewport/proyección:
-- El fix de logging (hallazgo #1) solo cambia qué líneas se loguean (`_fjni_log_debug` queda silenciado
-  al pasar de nivel 0/ALL a nivel 1/INFO por defecto) — no altera ningún valor de retorno ni control de
-  flujo de las funciones JNI, así que no puede afectar renderizado.
-- El boost de clocks (hallazgo #2) solo cambia velocidad de CPU/bus/GPU — no hay mecanismo conocido de
-  la SDK por el que esto cambie escala/zoom de nada.
+### 15.2 — Ambos fixes restaurados y commiteados (2026-07-16)
 
-**Hipótesis más probable:** el motor corre notablemente más rápido/fluido ahora, y puede tener alguna
-transición de cámara (p.ej. un zoom-in de apertura) atada a un contador de frames en vez de a tiempo
-real — antes, con el loop trabado a ~22FPS por los `fflush()` de hallazgo #1, esa transición podía no
-llegar nunca a completarse en el tiempo que el usuario miraba la pantalla; ahora sí llega a su estado
-final. Osea, no necesariamente una regresión nueva sino una animación completando por primera vez. No
-confirmado — no hay ninguna referencia a "zoom" ni en el Java decompilado (`apk_decompiled/`, todo el
-juego real es nativo) ni en el loader (`loader/*.c` no tiene lógica de zoom, solo `image_load.c` que
-escala splash/logo/título con un factor FIJO calculado una sola vez al boot, sin relación a FPS).
+Tras la falsa alarma de 15.1 hubo idas y vueltas (revertir todo → restaurar todo) que terminaron en:
+ambos fixes quedan aplicados y commiteados (commit `1753a76`) sin objeciones pendientes:
+`ENABLE_VERBOSE_JNI_LOG` en `OFF` en `CMakeLists.txt` y los 4 `scePowerSet*Frequency` en `main()`
+(`loader/main.c`). **Pendiente real (no relacionado con zoom):** confirmar en consola que el FPS sube
+al rango deseado — ver log por ausencia de spam `[JNI]` por frame.
 
-**Acción tomada (bisección):** revertido el boost de clocks (hallazgo #2) — las 4 líneas
-`scePowerSet*Frequency` en `main()` y el `#include <psp2/power.h>` — dejando SOLO el fix de logging
-(hallazgo #1), que por lo de arriba no debería poder causar esto y ya de por sí es una mejora de
-rendimiento real.
+## Fase 16: Bajones de FPS puntuales al golpear un objetivo (colisión) — 2026-07-17
 
-### 15.2 — Idas y vueltas: revertido, luego restaurado y commiteado a pedido del usuario (2026-07-16)
+**Reporte del usuario:** FPS estable rondando 30, pero cae de golpe (33 → 10) durante un instante cuando
+un poder colisiona contra un objetivo. Objetivo: mantener 25-30 FPS estable, sin esos picos.
 
-Tras el reporte de "más zoom" (15.1) el usuario pidió revertir todo, incluido el fix de logging —
-llegó a decirse en este mismo historial que Fase 15 quedaba cerrada sin cambios de código. Sin embargo,
-en la misma sesión el usuario pidió explícitamente **restaurar ambos fixes (logging OFF + boost de
-clocks) y commitearlos**, así que quedan aplicados: `ENABLE_VERBOSE_JNI_LOG` en `OFF` en
-`CMakeLists.txt` y los 4 `scePowerSet*Frequency` en `main()` (`loader/main.c`).
+**Causa:** `NativeRender()` corre en el thread principal/de render (`loader/main.c`, llamado una vez por
+frame). El motor llama de vuelta via JNI a `OnSoundPlay` (`loader/java.c`) **sincrónicamente, desde ese
+mismo thread**, cada vez que dispara un sonido — y un golpe/colisión dispara el sonido de impacto ahí
+mismo, a mitad de frame. `audio_play()` (`loader/audio.c`) hacía `fopen()` + `ov_open()` (parseo de
+header Ogg/Vorbis, con I/O adicional) **en el thread que la llama** — es decir, en el thread de render.
+Un `fopen`/lectura a `ux0:data` (tarjeta de memoria) puede tardar varios milisegundos; sumado a que un
+golpe puede disparar más de un sonido en el mismo frame, esto bloqueaba el render thread justo en el
+instante de la colisión — encaja exactamente con el patrón reportado (caída puntual, no sostenida).
+Segundo contribuyente menor: `Zenonia_OnSoundPlay` (`loader/java.c`) tenía un `game_log(...)` sin
+condicionar en cada disparo de sonido — cada log hace `fflush()` a disco (mismo patrón ya identificado
+como causa raíz en la Fase 15, hallazgo #1), y un combate dispara sonidos con frecuencia.
 
-**Estado real, sin resolver:** la causa del "más zoom en toda la pantalla" reportado en 15.1 nunca se
-confirmó ni se descartó — no se llegó a aislar cuál de los dos fixes (o si fue una tercera variable) lo
-causaba, porque el usuario pidió revertir antes de terminar esa bisección. Al restaurar ambos fixes tal
-cual, **el problema de zoom podría reaparecer** — si eso pasa, retomar la bisección de 15.1 (probar cada
-fix por separado) en vez de asumir que ya se descartó.
+**Fix:**
+1. `loader/java.c`: se quitó el `game_log` de `Zenonia_OnSoundPlay` (ya no aporta nada que no se pueda
+   inferir del comportamiento; el `fflush` por disparo de sonido no vale ese costo).
+2. `loader/audio.c`: `audio_play()` ya no abre archivos ni parsea el header Vorbis — ahora solo encola un
+   pedido (`play_request_t`, cola circular de 8 entradas protegida por `audio_mutex`) y retorna
+   inmediatamente. El `fopen()`/`ov_open()`/selección de voz (todo lo que antes vivía en `audio_play`) se
+   movió a `handle_play_request()`, que corre exclusivamente en `audio_thread` (el mezclador, ya existente
+   como thread separado) — `drain_pending_requests()` la vacía al principio de cada iteración del loop del
+   mezclador, antes de mezclar. Esto saca el I/O de disco del thread de render por completo; en el peor
+   caso, un `fopen` lento retrasa el siguiente bloque de audio (posible glitch/pop de audio), nunca el
+   frame de video.
+
+Compila limpio (`./build.sh`, verificado 2026-07-17). **Pendiente:** confirmar en consola que el pico de
+FPS en colisión desaparece o se reduce sustancialmente, y que no se introdujeron glitches de audio
+audibles (la cola de 8 debería sobrar — un golpe dispara a lo sumo un puñado de sonidos por frame).
+
+### 16.1 — Conversión RGB565→RGBA8888 sin malloc por frame + NEON (2026-07-17)
+
+**Contexto:** tras el fix de audio (16), el usuario pidió una lista de más mejoras posibles de
+rendimiento; el hallazgo #1 (más impacto, único tocado por ahora) fue `convert_rgb565_to_rgba8888()`
+(`loader/dynlib.c`) — corre una vez por frame sobre el blit del compositor 400×240 (vitaGL no maneja bien
+texturas `GL_UNSIGNED_SHORT_5_6_5` directo, ver `glTexImage2D_wrapper`/`glTexSubImage2D_wrapper`) y hacía,
+en el hot path del thread de render: `malloc()`+`free()` de ~384KB por llamada, más una división por
+canal por píxel (`*255/31`, `*255/63`) sobre 96.000 píxeles, más un escaneo de min/max solo para debug que
+seguía corriendo siempre aunque el log ya estuviera cortado a los primeros 10 frames.
+
+**Fix:**
+- **Sin malloc por frame:** el buffer de conversión (`rgba_conv_buf`) ahora es `static`, reusado entre
+  llamadas — se reserva una vez con `realloc` y solo vuelve a crecer si aparece una textura RGB565 más
+  grande que la vista hasta el momento. Se sacó el `free(new_pixels)` de los dos call sites
+  (`glTexImage2D_wrapper`/`glTexSubImage2D_wrapper`) ya que el buffer ahora vive entre llamadas. Seguro
+  porque todas las llamadas a GL ocurren secuencialmente en el mismo thread (de render) — no hay
+  concurrencia sobre el buffer.
+- **NEON:** conversión vectorizada de a 8 píxeles por iteración con `arm_neon.h` (`vld1q_u16` para cargar,
+  `vshrq_n_u16`/`vandq_u16` para extraer los 3 canales, `vmlaq_n_u16`+`vshrq_n_u16` para la expansión
+  5/6-bit→8-bit vía la fórmula estándar multiply-add-shift sin división (`(v*527+23)>>6` para 5 bits,
+  `(v*259+33)>>6` para 6 bits — mismo resultado que la división original, verificado ±1 LSB en todo el
+  rango, exacto en los extremos 0 y máximo), y `vst4_u8` para intercalar R/G/B/A directo al buffer de
+  salida en formato RGBA8888. El remanente (cuando el total de píxeles no es múltiplo de 8) usa la misma
+  fórmula en un loop escalar. Se sacó el escaneo de min/max (era solo debug, corría siempre sin importar
+  si el log ya estaba cortado).
+- Confirmado con la toolchain real: `__ARM_NEON__`/`__ARM_NEON_FP` están definidos por defecto en el GCC
+  de `vitasdk-softfp` (no hace falta ninguna flag `-mfpu=neon` extra) — `arm_neon.h` existe en el toolchain
+  y el archivo compila limpio con `./build.sh` (mismos warnings preexistentes de `strncpy`, nada nuevo).
+
+**Qué NO está confirmado todavía:** no hay forma de medir FPS real sin consola — pendiente que el usuario
+confirme que el pico de colisión mejora aún más sumado al fix de audio (16), y que la imagen se ve
+idéntica (la aproximación NEON puede diferir como máximo 1 LSB de la versión con división, imperceptible).
+
+## Fase 17: `logs/log_1784331019.txt` — "estable al principio, luego bajones otra vez" (2026-07-17)
+
+**Reporte del usuario:** con los fixes de las Fases 16/16.1 instalados, el juego arranca estable pero
+vuelve a tener bajones de frame una vez avanzado el gameplay. Adjuntó un log de sesión real.
+
+**Diagnóstico (análisis del log, sin timestamps por línea — `game_log()` no los tiene, solo el nombre del
+archivo tiene el timestamp de arranque; el análisis es por volumen/densidad de líneas, no por tiempo real):**
+el log tiene 1355 líneas totales y **445 `isAssetExist` + 477 `readAssets`** — juntas son ~68% del archivo.
+`Zenonia_readAssets`/`Zenonia_isAssetExist` (`loader/java.c`) hacían `game_log()` sin ninguna condición en
+CADA llamada (entrada, tamaño+primeros bytes, éxito/no encontrado) — cada `game_log()` es un
+`fprintf`+`fflush()` a disco (`main.c`). A diferencia del boot (asset loading es un evento único, esperado
+que tarde), estas funciones se siguen llamando con frecuencia durante gameplay real (el motor repregunta
+por assets constantemente) — mismo patrón de causa raíz que Fase 15 (JNI verbose log) y Fase 16
+(OnSoundPlay), pero en un sitio nuevo que ninguno de esos dos fixes cubría.
+
+**Hallazgo más concreto: 227 de esas líneas son `isAssetExist: sound/XXX.mmf -> 0 (not found)`** — el
+motor pregunta repetidamente por archivos `.mmf` (formato de patrón de vibración de Android, feature que
+este puerto nunca proveyó) que SIEMPRE van a dar "no encontrado", sin que el motor cachee ese resultado
+del lado nativo. Sumado a esto, **43 líneas `[JNI ERR][GetStaticMethodID] ... "OnVibrate" ... not found`**
+(cada una con un `[JNI WARN] method ID 0 not found!` acompañante) — `OnVibrate` no estaba registrado en
+`java.c`, así que `GetStaticMethodID` devuelve `NULL` cada vez; el motor no cachea ese `NULL` (patrón ya
+descrito en la skill `psvita-porting/jni_stubs.md`: un método sin registrar rompe el cacheo de jmethodID
+del lado del llamador), así que reintenta el lookup fallido en cada intento de vibrar — y estos ocurren
+repetidamente durante combate real (concentrados en las ventanas de `ui_status=3`, no en menú/título, lo
+que explica el patrón "estable al principio, bajones después": el menú/título casi no dispara ninguno de
+estos dos caminos).
+
+**Fix (`loader/java.c`):**
+1. Registrado `OnVibrate` (`(I)V`), `getPhoneNumber` (`()[B`) y `TrackEventDispatch`
+   (`(Ljava/lang/String;I)V`) en `nameToMethodId[]`/`methodsVoid[]`/`methodsObject[]` como no-ops
+   (`Zenonia_VoidNoop`/`Zenonia_getPhoneModel` reusados) — Vita no tiene motor de vibración, así que un
+   no-op es la respuesta correcta, no un workaround. Esto corta el spam de raíz: el motor ahora obtiene un
+   `jmethodID` válido y lo cachea, en vez de reintentar el lookup fallido en cada llamada.
+2. `Zenonia_readAssets`/`Zenonia_isAssetExist`: los logs de ruta feliz (entrada, tamaño+bytes, éxito, y el
+   caso "not found" que domina el volumen) ahora se cortan a los primeros 20 con un contador `static`, igual
+   patrón que ya usan todos los wrappers de `dynlib.c`. Los logs de error genuino (archivo no abre pese a
+   que `access()` lo encontró, tamaño corrupto) quedan SIN cortar — son señal de un bug real y no deberían
+   repetirse en operación normal.
+
+Compila limpio (`./build.sh`, verificado 2026-07-17). **Pendiente:** confirmar en consola que el bajón de
+frame durante gameplay avanzado desaparece o se reduce sustancialmente, y revisar un log nuevo para
+confirmar que ya no aparecen decenas de `OnVibrate`/`sound/*.mmf` — si el bajón persiste, el siguiente
+sospechoso sería perfilar el `.so` en sí (ver punto 9 de la lista de mejoras dada al usuario antes de esta
+fase) en vez de seguir buscando logging sin cortar.
+
+## Fase 18: experimento — RGB565 nativo a vitaGL sin conversión en CPU (2026-07-17)
+
+**Pregunta del usuario:** tras el fix de la Fase 16.1 (conversión RGB565→RGBA8888 optimizada con NEON +
+sin malloc/frame), preguntó si ya se sube RGB565 directo a la GPU sin ninguna conversión. Respuesta: no —
+la conversión sigue siendo obligatoria porque las pruebas iniciales de este port (ver sección de bring-up
+de texturas más arriba) confirmaron que vitaGL devuelve `GL_INVALID_ENUM` al recibir
+`GL_RGB`+`GL_UNSIGNED_SHORT_5_6_5` directo, aunque el enum esté definido en `vitaGL.h`. El usuario pidió
+confirmar esto de nuevo con un experimento real y actualizar la herramienta de build para poder generar
+ese variante fácilmente.
+
+**Implementación:**
+- Nueva opción CMake `ENABLE_NATIVE_RGB565_TEST` (OFF por defecto, mismo patrón que
+  `ENABLE_POSTPROCESS_SHADER`) — define `-DNATIVE_RGB565_TEST` y cambia `VPK_SUFFIX` a `_rgb565test`.
+- `loader/dynlib.c`: dentro de `glTexImage2D_wrapper`/`glTexSubImage2D_wrapper`, bajo
+  `#ifdef NATIVE_RGB565_TEST`, se saltea `convert_rgb565_to_rgba8888()` y se pasa el buffer RGB565 directo
+  a `glTexImage2D`/`glTexSubImage2D` con `GL_RGB`/`GL_UNSIGNED_SHORT_5_6_5` sin modificar. El
+  `glGetError()` que ya existía justo después de cada llamada (sin tocar) es exactamente el chequeo que
+  va a exponer `GL_INVALID_ENUM` (0x500) si vitaGL lo sigue rechazando — no hizo falta agregar detección
+  nueva. Se agregaron logs cortos (`[GL][RGB565-TEST] ...`, cortados a 5 líneas) para poder confirmar en
+  el log de consola que la ruta experimental efectivamente se activó.
+- El build default (`ENABLE_NATIVE_RGB565_TEST=OFF`) es bit-a-bit idéntico al ya confirmado — el `#ifdef`
+  aisla el experimento igual que `POSTPROCESS_SHADER` aisla el shader de post-proceso.
+- `build.sh` (raíz) ahora acepta una 4ta variante: `./build.sh rgb565test` (build dir y VPK separados,
+  `zenonia_2_rgb565test.vpk`).
+- `porting_tools/build/build_and_install.sh` (opción 5 del menú de `manage_vita.py`) ahora pregunta qué
+  variante compilar (Normal / Shader / RGB565 nativo) antes de la pregunta de Debug/Release existente, con
+  el mismo build dir/VPK separados por variante.
+
+**Verificado (cross-compile, sin consola):** las 3 rutas compilan limpio —
+`./build.sh normal`, `./build.sh rgb565test`, y `porting_tools/build/build_and_install.sh` con la opción 3
+elegida interactivamente (probado con inputs simulados: variante 3, Release, sin instalar en Vita3K) —
+las tres generan su `.vpk` correspondiente sin error.
+
+**Qué NO está confirmado todavía (requiere consola real, no se puede verificar solo compilando):** si
+`GL_INVALID_ENUM` sigue apareciendo con la versión de vitaGL actual. **Próximo paso:** instalar
+`zenonia_2_rgb565test.vpk` en consola y revisar el log —
+si aparece `[GL] glTexImage2D ERROR: 500` o `[GL] glTexSubImage2D ERROR: 500` justo después de las líneas
+`[GL][RGB565-TEST] ...`, se confirma que la conversión en CPU sigue siendo necesaria (sin cambios); si NO
+aparece ningún error y la imagen se ve correcta, se podría eliminar `convert_rgb565_to_rgba8888()` por
+completo en el build normal, ahorrando el costo de esa conversión (aunque ya esté optimizada con NEON,
+sería aún mejor no tener que hacerla).
+
+**CONFIRMADO en consola (2026-07-17):** el usuario probó `zenonia_2_rgb565test.vpk` — **sin ningún error**
+(ni `GL_INVALID_ENUM` ni ningún otro `[GL] ... ERROR`). O sea que la versión de vitaGL de este toolchain
+YA acepta `GL_RGB`+`GL_UNSIGNED_SHORT_5_6_5` directo — el rechazo documentado en el bring-up original de
+texturas (más arriba en este archivo) ya no aplica con la vitaGL actual. **Pendiente antes de promover
+esto a default:** confirmar que la imagen se ve idéntica al build normal (colores correctos, sin
+artefactos) — el usuario todavía no lo confirmó explícitamente, solo la ausencia de errores GL. Si se
+confirma visualmente, se puede eliminar `convert_rgb565_to_rgba8888()` del build normal por completo (más
+ahorro de CPU que la optimización NEON de la Fase 16.1, que dejaría de hacer falta).
+
+**Bonus inesperado reportado por el usuario:** con este build (que además ya trae los fixes de las Fases
+15/16/16.1/17 acumulados) el juego corre a un firme **40 FPS sin cap**, más rápido que el objetivo
+original (30 FPS, calibrado para el hardware Android de 2011) y sin VSync (tearing). Ver Fase 19 para el
+fix de cap de framerate + VSync aplicado a raíz de este reporte.
+
+## Fase 19: cap a ~30 FPS con VSync real (2026-07-17)
+
+**Reporte del usuario:** tras confirmar el build de RGB565 nativo sin errores, reportó que el juego corre
+fijo a 40 FPS y pidió capearlo a 30 FPS máximo con VSync.
+
+**Diagnóstico:** `gl_init()` (`loader/main.c`) nunca configuraba VSync — el loop principal llama
+`vglSwapBuffers()` sin ningún wait por vblank, así que el juego corre tan rápido como el CPU pueda producir
+frames (con tearing). Los 40 FPS reportados son consistentes con la suma de todos los fixes de
+rendimiento anteriores (Fases 15, 16, 16.1) corriendo sin ningún límite — más rápido que los ~30 FPS para
+los que está calibrada la lógica original del motor (hardware Android de 2011), lo cual no es deseable en
+un port 1:1: sin cap, la velocidad de juego/animaciones puede correr más rápido que lo que el diseño
+original esperaba.
+
+**Fix:** `vitaGL.h` expone `vglWaitVblankStart(GLboolean)` (VSync simple, cap a ~59.94Hz = el refresco
+nativo de la Vita) y `eglSwapInterval(EGLDisplay, EGLint)` para más granularidad (esperar N vblanks por
+swap). Se usó la segunda: `eglSwapInterval(eglGetDisplay(EGL_DEFAULT_DISPLAY), 2)` en `gl_init()`, justo
+después de `vglInitExtended()` — interval=2 espera 2 vblanks por swap (~59.94Hz / 2 ≈ 29.97 FPS), dando el
+cap a 30 FPS pedido CON VSync real (sin tearing), en vez de solo `vglWaitVblankStart(GL_TRUE)` que hubiera
+capeado a ~60 FPS.
+
+Ambas variantes (`./build.sh normal` y `./build.sh rgb565test`) compilan y linkean limpio (confirmado que
+`eglGetDisplay`/`eglSwapInterval` existen en `libvitaGL.a` de este toolchain vía `nm` antes de compilar).
+**Pendiente:** confirmar en consola que el framerate ahora se estabiliza en ~30 FPS sin tearing.
 
 ## Backlog — Ideas para más adelante (NO implementar hasta confirmar que no quedan más bugs)
 

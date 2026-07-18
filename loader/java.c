@@ -64,6 +64,18 @@ NameToMethodID nameToMethodId[] = {
     { 10, "OnStopSound", METHOD_TYPE_VOID },
     { 11, "hideLoadingDialog", METHOD_TYPE_VOID },
     { 12, "OnShowSaveButton", METHOD_TYPE_VOID },
+    // Vita no tiene motor de vibracion -- no-ops legitimos. Registrados
+    // ademas porque un metodo sin registrar hace que GetStaticMethodID
+    // devuelva NULL, y el motor no cachea ese NULL: vuelve a intentar el
+    // lookup en cada llamada (p.ej. cada golpe en combate intenta vibrar),
+    // spameando "[JNI ERR] ... not found" con su fflush a disco por llamada
+    // -- visto en logs/log_1784331019.txt (43 veces solo en esa sesion,
+    // concentradas durante gameplay real). Registrar el metodo (aunque sea
+    // no-op) hace que el motor obtenga un id valido y lo cachee, cortando el
+    // spam de raiz.
+    { 13, "OnVibrate", METHOD_TYPE_VOID },
+    { 14, "getPhoneNumber", METHOD_TYPE_OBJECT },
+    { 15, "TrackEventDispatch", METHOD_TYPE_VOID },
 };
 
 // Estado de UI que reporta el motor via OnUIStatusChange. main.c lo usa para
@@ -79,16 +91,29 @@ volatile int g_ui_status = -1;
 // this replaces. FalsoJNI's own NewByteArray/JavaDynArray uses a different
 // layout, so this can't go through it: it must keep returning a raw block
 // shaped like Dalvik's ArrayObject.
+// readAssets/isAssetExist se llaman muy seguido durante gameplay real (no
+// solo en el boot) -- loguear cada llamada aca hacia un fflush() a disco por
+// llamada en el thread de render (visto en logs/log_1784331019.txt: 445+477
+// lineas de estas dos funciones sobre 1355 totales de esa sesion, muchas
+// durante juego activo). Los logs de la ruta feliz (entrada, tamaño, éxito)
+// se cortan a los primeros N para debug de arranque; los de error genuino
+// (archivo no abre, tamaño corrupto) quedan sin cortar porque son señal de un
+// bug real y no deberían repetirse en operación normal.
+static int readassets_log = 0;
+#define READASSETS_LOG_CAP 20
+
 jobject Zenonia_readAssets(jmethodID id, va_list args) {
     jstring filename = va_arg(args, jstring);
     const char *name = (const char *) filename;
-    game_log("[Java] readAssets: %s\n", name ? name : "(null)");
+    if (readassets_log < READASSETS_LOG_CAP)
+        game_log("[Java] readAssets: %s\n", name ? name : "(null)");
 
     if (!name) return NULL;
 
     char path[256];
     if (!zenonia_resolve_asset_path(name, path, sizeof(path))) {
-        game_log("[Java] readAssets: not found (tried bare and assets/-prefixed): %s\n", name);
+        if (readassets_log < READASSETS_LOG_CAP)
+            game_log("[Java] readAssets: not found (tried bare and assets/-prefixed): %s\n", name);
         return NULL;
     }
 
@@ -122,8 +147,9 @@ jobject Zenonia_readAssets(jmethodID id, va_list args) {
     fseek(f, 0, SEEK_SET);
     fread(peek, 1, size < 8 ? (size_t) size : 8, f);
     fseek(f, cur, SEEK_SET);
-    game_log("[Java] readAssets: %s size=%ld first8=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-        path, size, peek[0], peek[1], peek[2], peek[3], peek[4], peek[5], peek[6], peek[7]);
+    if (readassets_log < READASSETS_LOG_CAP)
+        game_log("[Java] readAssets: %s size=%ld first8=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+            path, size, peek[0], peek[1], peek[2], peek[3], peek[4], peek[5], peek[6], peek[7]);
 
     if (size < 0 || size > 64 * 1024 * 1024) { // no single game asset should be anywhere near 64MB
         game_log("[Java] readAssets: bogus/oversized size %ld for %s, aborting\n", size, path);
@@ -145,7 +171,10 @@ jobject Zenonia_readAssets(jmethodID id, va_list args) {
     fread((char *) array_obj + 16, 1, size, f);
     fclose(f);
 
-    game_log("[Java] readAssets: Success. Size: %ld bytes\n", size);
+    if (readassets_log < READASSETS_LOG_CAP) {
+        game_log("[Java] readAssets: Success. Size: %ld bytes\n", size);
+        readassets_log++;
+    }
     return array_obj;
 }
 
@@ -156,6 +185,16 @@ jobject Zenonia_readAssets(jmethodID id, va_list args) {
 // a nonexistent ptc/000.ptc as present and load it, faulting deep inside a
 // kernel call downstream (confirmed via vita-parse-core on a real crash
 // dump -- LR resolved to CMvResourceMgr::LoadAllPTCData()).
+// El motor llama isAssetExist repetidamente durante gameplay real, no solo en
+// carga -- confirmado en logs/log_1784331019.txt: 227 misses solo de
+// "sound/*.mmf" (formato de vibracion de Android que este puerto nunca provee,
+// asi que siempre da "not found", una y otra vez sin cachear el resultado del
+// lado del motor). Cada llamada antes hacia un fflush() a disco sin condicion,
+// en el thread de render, sea que el asset exista o no. Cortado a los
+// primeros N para debug de arranque.
+static int isassetexist_log = 0;
+#define ISASSETEXIST_LOG_CAP 20
+
 jint Zenonia_isAssetExist(jmethodID id, va_list args) {
     jstring filename = va_arg(args, jstring);
     const char *name = (const char *) filename;
@@ -165,12 +204,18 @@ jint Zenonia_isAssetExist(jmethodID id, va_list args) {
     if (zenonia_resolve_asset_path(name, path, sizeof(path))) {
         struct stat st;
         if (stat(path, &st) == 0 && !S_ISDIR(st.st_mode)) {
-            game_log("[Java] isAssetExist: %s -> %ld (%s)\n", name, (long)st.st_size, path);
+            if (isassetexist_log < ISASSETEXIST_LOG_CAP) {
+                game_log("[Java] isAssetExist: %s -> %ld (%s)\n", name, (long)st.st_size, path);
+                isassetexist_log++;
+            }
             return (jint)st.st_size;
         }
     }
-    
-    game_log("[Java] isAssetExist: %s -> 0 (not found)\n", name);
+
+    if (isassetexist_log < ISASSETEXIST_LOG_CAP) {
+        game_log("[Java] isAssetExist: %s -> 0 (not found)\n", name);
+        isassetexist_log++;
+    }
     return 0;
 }
 
@@ -211,7 +256,6 @@ void Zenonia_OnSoundPlay(jmethodID id, va_list args) {
     int snd_id = va_arg(args, int);
     int vol = va_arg(args, int);
     int is_loop = va_arg(args, int); // jboolean
-    game_log("[Java] OnSoundPlay: id=%d vol=%d isLoop=%d\n", snd_id, vol, is_loop);
     audio_play(snd_id, vol, is_loop);
 }
 
@@ -234,6 +278,7 @@ MethodsObject methodsObject[] = {
     { 3, Zenonia_readAssets },
     { 6, Zenonia_getPhoneModel },
     { 7, Zenonia_getAbsolueFilePath },
+    { 14, Zenonia_getPhoneModel }, // getPhoneNumber: mismo no-op (NULL) que getPhoneModel
 };
 MethodsShort methodsShort[] = {};
 MethodsVoid methodsVoid[] = {
@@ -243,6 +288,8 @@ MethodsVoid methodsVoid[] = {
     { 10, Zenonia_OnStopSound },
     { 11, Zenonia_VoidNoop },
     { 12, Zenonia_VoidNoop },
+    { 13, Zenonia_VoidNoop }, // OnVibrate: Vita no tiene motor de vibracion
+    { 15, Zenonia_VoidNoop }, // TrackEventDispatch: telemetria de Android, sin equivalente
 };
 
 /*

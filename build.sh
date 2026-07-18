@@ -1,12 +1,16 @@
 #!/bin/bash
 set -e
 
-# Uso: ./build.sh [normal|shader|safe]
+# Uso: ./build.sh [normal|shader|safe|rgb565test]
 # "shader" compila con ENABLE_POSTPROCESS_SHADER=ON (ver port_progress.md
 # Backlog B.1: sharpen de post-proceso sobre el blit del compositor) y genera
 # zenonia_2_shader.vpk en un build dir separado -- no toca el build "normal"
 # ya confirmado en consola (build/zenonia_2.vpk).
 # "safe" compila un VPK sin assets con copyright, seguro para distribución.
+# "rgb565test" compila con ENABLE_NATIVE_RGB565_TEST=ON (ver port_progress.md
+# Fase 18: experimento para confirmar si vitaGL sigue rechazando RGB565 nativo
+# con GL_INVALID_ENUM, saltando la conversion a RGBA8888 en CPU) y genera
+# zenonia_2_rgb565test.vpk, tambien en build dir separado.
 VARIANT="${1:-normal}"
 
 # Configuración
@@ -28,8 +32,13 @@ case "$VARIANT" in
         CMAKE_POSTPROCESS_FLAG="-DENABLE_POSTPROCESS_SHADER=OFF -DSAFE_DISTRIBUTION=ON"
         VPK_NAME="zenonia_2_safe.vpk"
         ;;
+    rgb565test)
+        BUILD_DIR="/tmp/zenonia2-build-rgb565test"
+        CMAKE_POSTPROCESS_FLAG="-DENABLE_POSTPROCESS_SHADER=OFF -DSAFE_DISTRIBUTION=OFF -DENABLE_NATIVE_RGB565_TEST=ON"
+        VPK_NAME="zenonia_2_rgb565test.vpk"
+        ;;
     *)
-        echo "❌ Variante desconocida: '$VARIANT' (usar 'normal', 'shader' o 'safe')"
+        echo "❌ Variante desconocida: '$VARIANT' (usar 'normal', 'shader', 'safe' o 'rgb565test')"
         exit 1
         ;;
 esac

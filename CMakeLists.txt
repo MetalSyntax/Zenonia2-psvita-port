@@ -69,6 +69,21 @@ if (SAFE_DISTRIBUTION)
   set(VPK_SUFFIX "_safe")
 endif()
 
+## Experimento: subir el buffer del compositor (400x240 RGB565) directo a
+## vitaGL con GL_RGB/GL_UNSIGNED_SHORT_5_6_5, sin la conversion a RGBA8888 en
+## CPU que loader/dynlib.c hace hoy (convert_rgb565_to_rgba8888, ver
+## port_progress.md Fase 16.1). Esa conversion existe porque las pruebas
+## iniciales del port (ver port_progress.md, bring-up de texturas) confirmaron
+## que vitaGL devolvia GL_INVALID_ENUM con ese formato -- este flag es para
+## re-confirmar si eso sigue siendo cierto con la version de vitaGL actual, en
+## un VPK aparte que no arriesga el build normal ya confirmado. OFF por
+## defecto. Ver port_progress.md Fase 18.
+option(ENABLE_NATIVE_RGB565_TEST "Experiment: upload RGB565 straight to vitaGL without the CPU conversion, to test whether GL_INVALID_ENUM still happens (see port_progress.md Fase 18)" OFF)
+if (ENABLE_NATIVE_RGB565_TEST)
+  add_definitions(-DNATIVE_RGB565_TEST)
+  set(VPK_SUFFIX "_rgb565test")
+endif()
+
 ## Flags and includes for building
 # Note that we make sure not to overwrite previous flags
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")

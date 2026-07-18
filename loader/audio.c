@@ -57,6 +57,24 @@ typedef struct {
     float gain;
 } voice_t;
 
+// Pedido de reproduccion encolado por audio_play() (llamada desde el thread de
+// render via OnSoundPlay). El fopen()/ov_open() de una voz nueva es I/O a
+// almacenamiento y puede tardar varios ms -- si se hiciera ahi mismo, cada
+// sonido disparado a mitad de frame (p.ej. el golpe de un poder contra un
+// objetivo) trababa el thread de render entero. Esta cola deja que
+// audio_play() solo encole y el thread mezclador (audio_thread) haga el I/O
+// pesado de forma asincrona.
+typedef struct {
+    int snd_id;
+    int vol;
+    int is_loop;
+} play_request_t;
+
+#define MAX_PENDING_REQUESTS 8
+static play_request_t pending[MAX_PENDING_REQUESTS];
+static int pending_head = 0;
+static int pending_count = 0;
+
 static voice_t voices[NUM_VOICES];
 static SceUID audio_mutex = -1;
 static SceUID audio_thread_id = -1;
@@ -108,11 +126,87 @@ static int voice_decode(voice_t *v, int16_t *out, int frames) {
     return done;
 }
 
+// Abre y decodea el header de una voz nueva (fopen + ov_open -- I/O de
+// almacenamiento, puede tardar varios ms) y la asigna a un canal. Corre
+// SIEMPRE en audio_thread, nunca en el thread que llama a audio_play().
+static void handle_play_request(const play_request_t *req) {
+    char path[128];
+    snprintf(path, sizeof(path), SND_DIR "/s%03d.ogg", req->snd_id);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        static int miss_log = 0;
+        if (miss_log < 20) {
+            game_log("[AUDIO] no encontrado: %s\n", path);
+            miss_log++;
+        }
+        return;
+    }
+
+    OggVorbis_File vf;
+    if (ov_open(f, &vf, NULL, 0) < 0) {
+        game_log("[AUDIO] ov_open fallo para %s\n", path);
+        fclose(f);
+        return;
+    }
+    vorbis_info *vi = ov_info(&vf, -1);
+    if (!vi || (vi->channels != 1 && vi->channels != 2) || vi->rate != AUDIO_RATE) {
+        game_log("[AUDIO] formato inesperado en %s (ch=%d rate=%ld)\n",
+                 path, vi ? vi->channels : -1, vi ? vi->rate : -1);
+        ov_clear(&vf); // tambien cierra el FILE*
+        return;
+    }
+
+    sceKernelLockMutex(audio_mutex, 1, NULL);
+
+    voice_t *target = NULL;
+    if (is_sfx_id(req->snd_id)) {
+        // SoundPool: buscar una voz SFX libre; si no hay, pisar la primera
+        for (int i = VOICE_SFX0; i < NUM_VOICES; i++)
+            if (!voices[i].active) { target = &voices[i]; break; }
+        if (!target) target = &voices[VOICE_SFX0];
+    } else if (req->is_loop) {
+        target = &voices[VOICE_BGM];    // mBgmPlayer: corta la musica anterior
+    } else {
+        target = &voices[VOICE_STREAM]; // mPlayer: corta el stream anterior
+    }
+
+    voice_close(target);
+    target->vf = vf;
+    target->loop = req->is_loop;
+    target->channels = vi->channels;
+    // vol llega 0-100 (observado 50); MAX_VOLUME=80 en NexusSound. Escala lineal.
+    target->gain = req->vol > 0 ? (req->vol > 100 ? 1.0f : req->vol / 100.0f) : 1.0f;
+    target->active = 1;
+
+    sceKernelUnlockMutex(audio_mutex, 1);
+}
+
+static void drain_pending_requests(void) {
+    for (;;) {
+        play_request_t req;
+
+        sceKernelLockMutex(audio_mutex, 1, NULL);
+        if (pending_count == 0) {
+            sceKernelUnlockMutex(audio_mutex, 1);
+            break;
+        }
+        req = pending[pending_head];
+        pending_head = (pending_head + 1) % MAX_PENDING_REQUESTS;
+        pending_count--;
+        sceKernelUnlockMutex(audio_mutex, 1);
+
+        handle_play_request(&req);
+    }
+}
+
 static int audio_thread(SceSize args, void *argp) {
     static int16_t mix[AUDIO_GRAIN * 2];
     static int16_t buf[AUDIO_GRAIN * 2];
 
     while (audio_running) {
+        drain_pending_requests();
+
         memset(mix, 0, sizeof(mix));
 
         sceKernelLockMutex(audio_mutex, 1, NULL);
@@ -153,58 +247,20 @@ void audio_init(void) {
     }
 }
 
+// Llamada desde el thread de render (via OnSoundPlay, ver java.c) -- debe ser
+// rapida y jamas bloquear en I/O. Solo encola el pedido; audio_thread hace el
+// fopen()/ov_open() real de forma asincrona (ver handle_play_request arriba).
 void audio_play(int snd_id, int vol, int is_loop) {
     if (audio_port < 0) return;
 
-    char path[128];
-    snprintf(path, sizeof(path), SND_DIR "/s%03d.ogg", snd_id);
-
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        static int miss_log = 0;
-        if (miss_log < 20) {
-            game_log("[AUDIO] no encontrado: %s\n", path);
-            miss_log++;
-        }
-        return;
-    }
-
-    OggVorbis_File vf;
-    if (ov_open(f, &vf, NULL, 0) < 0) {
-        game_log("[AUDIO] ov_open fallo para %s\n", path);
-        fclose(f);
-        return;
-    }
-    vorbis_info *vi = ov_info(&vf, -1);
-    if (!vi || (vi->channels != 1 && vi->channels != 2) || vi->rate != AUDIO_RATE) {
-        game_log("[AUDIO] formato inesperado en %s (ch=%d rate=%ld)\n",
-                 path, vi ? vi->channels : -1, vi ? vi->rate : -1);
-        ov_clear(&vf); // tambien cierra el FILE*
-        return;
-    }
-
     sceKernelLockMutex(audio_mutex, 1, NULL);
-
-    voice_t *target = NULL;
-    if (is_sfx_id(snd_id)) {
-        // SoundPool: buscar una voz SFX libre; si no hay, pisar la primera
-        for (int i = VOICE_SFX0; i < NUM_VOICES; i++)
-            if (!voices[i].active) { target = &voices[i]; break; }
-        if (!target) target = &voices[VOICE_SFX0];
-    } else if (is_loop) {
-        target = &voices[VOICE_BGM];    // mBgmPlayer: corta la musica anterior
-    } else {
-        target = &voices[VOICE_STREAM]; // mPlayer: corta el stream anterior
+    if (pending_count < MAX_PENDING_REQUESTS) {
+        int idx = (pending_head + pending_count) % MAX_PENDING_REQUESTS;
+        pending[idx].snd_id = snd_id;
+        pending[idx].vol = vol;
+        pending[idx].is_loop = is_loop;
+        pending_count++;
     }
-
-    voice_close(target);
-    target->vf = vf;
-    target->loop = is_loop;
-    target->channels = vi->channels;
-    // vol llega 0-100 (observado 50); MAX_VOLUME=80 en NexusSound. Escala lineal.
-    target->gain = vol > 0 ? (vol > 100 ? 1.0f : vol / 100.0f) : 1.0f;
-    target->active = 1;
-
     sceKernelUnlockMutex(audio_mutex, 1);
 }
 
