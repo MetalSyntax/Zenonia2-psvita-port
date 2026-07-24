@@ -78,10 +78,10 @@ endif()
 ## re-confirmar si eso sigue siendo cierto con la version de vitaGL actual, en
 ## un VPK aparte que no arriesga el build normal ya confirmado. OFF por
 ## defecto. Ver port_progress.md Fase 18.
-option(ENABLE_NATIVE_RGB565_TEST "Experiment: upload RGB565 straight to vitaGL without the CPU conversion, to test whether GL_INVALID_ENUM still happens (see port_progress.md Fase 18)" OFF)
+option(ENABLE_NATIVE_RGB565_TEST "Experiment: upload RGB565 straight to vitaGL without the CPU conversion, to test whether GL_INVALID_ENUM still happens (see port_progress.md Fase 18)" ON)
 if (ENABLE_NATIVE_RGB565_TEST)
   add_definitions(-DNATIVE_RGB565_TEST)
-  set(VPK_SUFFIX "_rgb565test")
+  # set(VPK_SUFFIX "_rgb565test") # Remove suffix to keep normal name
 endif()
 
 ## Flags and includes for building
