@@ -48,6 +48,14 @@ if (ENABLE_VERBOSE_JNI_LOG)
   add_definitions(-DFALSOJNI_DEBUGLEVEL=0)
 endif()
 
+## Botones virtuales en pantalla (D-pad y botones táctiles de Android).
+## OFF por defecto: la PS Vita tiene botones físicos reales y se oculta el HUD
+## táctil en pantalla aplicando un parche no-op a drawDpad y drawButton.
+option(ENABLE_VIRTUAL_BUTTONS "Display virtual buttons/D-pad on screen (OFF = clean screen for PS Vita buttons)" OFF)
+if (NOT ENABLE_VIRTUAL_BUTTONS)
+  add_definitions(-DHIDE_VIRTUAL_BUTTONS)
+endif()
+
 ## Shader de post-proceso (sharpen) opcional sobre el blit final del motor
 ## (compositor por-software 400x240 -> pantalla completa, ver
 ## port_progress.md Backlog B.1). OFF por defecto: el .vpk resultante es
@@ -58,30 +66,28 @@ endif()
 option(ENABLE_POSTPROCESS_SHADER "Apply an experimental sharpen post-process shader to the engine's software-composited frame (see port_progress.md Backlog B.1)" OFF)
 if (ENABLE_POSTPROCESS_SHADER)
   add_definitions(-DPOSTPROCESS_SHADER)
-  set(VPK_SUFFIX "_shader")
-else()
-  set(VPK_SUFFIX "")
 endif()
 
 ## Option to build a safe VPK without copyrighted assets
 option(SAFE_DISTRIBUTION "Build VPK without copyrighted assets for safe distribution" OFF)
-if (SAFE_DISTRIBUTION)
-  set(VPK_SUFFIX "_safe")
-endif()
 
 ## Experimento: subir el buffer del compositor (400x240 RGB565) directo a
 ## vitaGL con GL_RGB/GL_UNSIGNED_SHORT_5_6_5, sin la conversion a RGBA8888 en
 ## CPU que loader/dynlib.c hace hoy (convert_rgb565_to_rgba8888, ver
-## port_progress.md Fase 16.1). Esa conversion existe porque las pruebas
-## iniciales del port (ver port_progress.md, bring-up de texturas) confirmaron
-## que vitaGL devolvia GL_INVALID_ENUM con ese formato -- este flag es para
-## re-confirmar si eso sigue siendo cierto con la version de vitaGL actual, en
-## un VPK aparte que no arriesga el build normal ya confirmado. OFF por
-## defecto. Ver port_progress.md Fase 18.
+## port_progress.md Fase 16.1).
 option(ENABLE_NATIVE_RGB565_TEST "Experiment: upload RGB565 straight to vitaGL without the CPU conversion, to test whether GL_INVALID_ENUM still happens (see port_progress.md Fase 18)" ON)
 if (ENABLE_NATIVE_RGB565_TEST)
   add_definitions(-DNATIVE_RGB565_TEST)
-  # set(VPK_SUFFIX "_rgb565test") # Remove suffix to keep normal name
+endif()
+
+if (NOT DEFINED VPK_SUFFIX)
+  if (ENABLE_POSTPROCESS_SHADER)
+    set(VPK_SUFFIX "_shader")
+  elseif (SAFE_DISTRIBUTION)
+    set(VPK_SUFFIX "_safe")
+  else()
+    set(VPK_SUFFIX "")
+  endif()
 endif()
 
 ## Flags and includes for building

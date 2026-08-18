@@ -18,10 +18,21 @@ extern void game_log(const char *fmt, ...);
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
 
-// Backward-mapped bilinear resample of a `sw`x`sh` RGBA8888 image into a
-// `dw`x`dh` destination, scaling by `scale` and centering/cropping any
-// overflow -- i.e. a "cover" fit when scale == max(dw/sw, dh/sh), or a plain
-// scale (no crop) when dw/dh already match round(sw*scale)/round(sh*scale).
+/**
+ * @brief Backward-mapped bilinear resample of an RGBA8888 image, with
+ *        optional "cover" fit (crop to fill) or a plain uncropped scale.
+ *
+ * @param src   Source RGBA8888 pixel buffer, `sw` x `sh`.
+ * @param sw    Source width, in pixels.
+ * @param sh    Source height, in pixels.
+ * @param dst   Destination RGBA8888 pixel buffer, `dw` x `dh`.
+ * @param dw    Destination width, in pixels.
+ * @param dh    Destination height, in pixels.
+ * @param scale Scale factor applied to the source before centering/cropping.
+ *              scale == max(dw/sw, dh/sh) yields a "cover" fit; scale such
+ *              that round(sw*scale)/round(sh*scale) == dw/dh yields a plain
+ *              scale with no crop.
+ */
 static void cover_resize_rgba(const unsigned char *src, int sw, int sh,
                                unsigned char *dst, int dw, int dh, float scale) {
     float off_x = (sw * scale - dw) / 2.0f;

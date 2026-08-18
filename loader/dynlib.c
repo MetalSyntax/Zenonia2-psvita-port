@@ -32,14 +32,22 @@ void glTexParameterx_wrapper(GLenum target, GLenum pname, int param) {
     glTexParameteri(target, pname, param);
 }
 
-// Buffer reusado entre llamadas -- esta conversion corre una vez por frame
-// (el blit del compositor 400x240, ver glTexSubImage2D_wrapper) y antes hacia
-// malloc()+free() de ~384KB en cada una, agregando churn de heap justo en el
-// hot path de render. Nunca se libera; crece con realloc solo si hace falta
-// mas espacio (una textura RGB565 mas grande que la vista hasta ahora).
+/**
+ * @brief Persistent scratch buffer for RGB565->RGBA8888 conversion.
+ * @details Reused across calls instead of malloc()/free() per frame.
+ * @note Ver docs/loader/dynlib.md para el razonamiento de diseño.
+ */
 static uint8_t *rgba_conv_buf = NULL;
 static size_t rgba_conv_buf_cap = 0;
 
+/**
+ * @brief Converts an RGB565 pixel buffer to RGBA8888 in-place into a reused scratch buffer.
+ * @param pixels Source RGB565 pixel data.
+ * @param width Image width in pixels.
+ * @param height Image height in pixels.
+ * @return Pointer to the converted RGBA8888 buffer (owned by this module), or NULL if @p pixels is NULL.
+ * @note Ver docs/loader/dynlib.md para el razonamiento de diseño (buffer scratch y formula NEON).
+ */
 void *convert_rgb565_to_rgba8888(const void *pixels, int width, int height) {
     if (!pixels) return NULL;
 
@@ -53,11 +61,10 @@ void *convert_rgb565_to_rgba8888(const void *pixels, int width, int height) {
     const uint16_t *src = (const uint16_t *)pixels;
     uint8_t *dst = rgba_conv_buf;
 
-    // Expansion 5/6-bit -> 8-bit vectorizada con NEON, 8 pixeles por
-    // iteracion. Formula multiply-add-shift (bit-replication) en vez de la
-    // division escalar original: mismo resultado +/-1 LSB (imperceptible),
-    // sin instruccion de division y vectorizable en registros de 16 bits sin
-    // overflow (31*527+23=16360 y 63*259+33=16350, ambos caben en 16 bits).
+    /**
+     * @brief NEON-vectorized 5/6-bit -> 8-bit channel expansion, 8 pixels per iteration.
+     * @note Ver docs/loader/dynlib.md para el razonamiento de la formula multiply-add-shift.
+     */
     const uint16x8_t mask5 = vdupq_n_u16(0x1F);
     const uint16x8_t mask6 = vdupq_n_u16(0x3F);
     const uint16x8_t add5 = vdupq_n_u16(23);
@@ -112,16 +119,16 @@ void glTexImage2D_wrapper(GLenum target, GLint level, GLint internalformat, GLsi
             uint16_t *p = (uint16_t *)pixels;
             game_log("  -> First 4 pixels: %04x %04x %04x %04x\n", p[0], p[1], p[2], p[3]);
         }
-        // Unica textura RGB565 del motor: el buffer compuesto 400x240 (subido
-        // a un POT via glTexSubImage2D despues). El shader de post-proceso
-        // opcional necesita el tamaño real de este POT para su uniform de
-        // texel size -- ver postprocess.c.
+        /**
+         * @brief Registers the POT texture dimensions with the post-process module.
+         * @note Ver docs/loader/dynlib.md para el razonamiento (unica textura RGB565 del motor).
+         */
         postprocess_set_source_size(width, height);
 #ifdef NATIVE_RGB565_TEST
-        // Experimento Fase 18: subir RGB565 nativo, sin convertir. Si vitaGL
-        // sigue sin soportarlo, el chequeo glGetError() de mas abajo va a
-        // loguear GL_INVALID_ENUM (0x500) -- exactamente la señal que
-        // confirma/descarta esto sin ambiguedad.
+        /**
+         * @brief Uploads RGB565 natively (no CPU conversion) — build-time experiment.
+         * @note Ver docs/loader/dynlib.md para el razonamiento (Fase 18: deteccion via GL_INVALID_ENUM).
+         */
         static int native_log = 0;
         if (native_log < 5) {
             game_log("[GL][RGB565-TEST] glTexImage2D nativo (sin conversion): w=%d h=%d\n", width, height);
@@ -157,9 +164,10 @@ void glTexSubImage2D_wrapper(GLenum target, GLint level, GLint xoffset, GLint yo
     glGetError();
     
     if (format == GL_RGB && type == GL_UNSIGNED_SHORT_5_6_5) {
-        // w=400 h=240 es la firma unica del blit del compositor (confirmado
-        // en log) -- marcarlo para que el proximo glDrawArrays use el shader
-        // de post-proceso opcional en vez de fixed-function GL_REPLACE.
+        /**
+         * @brief Flags the compositor's full-frame blit (400x240) for post-process handling.
+         * @note Ver docs/loader/dynlib.md para el razonamiento (firma unica del blit del compositor).
+         */
         if (width == 400 && height == 240) postprocess_mark_next_draw();
 #ifdef NATIVE_RGB565_TEST
         static int native_sub_log = 0;
@@ -180,14 +188,11 @@ void glTexSubImage2D_wrapper(GLenum target, GLint level, GLint xoffset, GLint yo
     if (err != GL_NO_ERROR) game_log("[GL] glTexSubImage2D ERROR: %x\n", err);
 }
 
-// vitaGL does not correctly consume GL_FIXED vertex arrays (same class of bug already
-// worked around for glClearColorx_wrapper/glTexParameterx_wrapper above). This engine is a
-// J2ME-derived port that feeds Q16.16 fixed-point vertex data, so passing GL_FIXED straight
-// through leaves vitaGL reading the raw ints as if they were floats -> geometry collapses
-// off-frustum and the screen stays blank even though the engine keeps rendering frames.
-// glVertexPointer_wrapper defers conversion to glDrawArrays_wrapper below, since only there
-// do we know how many vertices actually need converting.
-// Defers GL_FIXED attribute conversions to glDrawArrays_wrapper since only there we know the count
+/**
+ * @brief Pending GL_FIXED vertex array state, converted lazily in glDrawArrays_wrapper().
+ * @details Deferred here because only glDrawArrays_wrapper() knows the actual vertex count to convert.
+ * @note Ver docs/loader/dynlib.md para el razonamiento (bug de vitaGL con GL_FIXED).
+ */
 static const int32_t *pending_fixed_verts = NULL;
 static GLint pending_fixed_size = 0;
 static GLsizei pending_fixed_stride = 0;
@@ -267,11 +272,11 @@ void glDrawArrays_wrapper(GLenum mode, GLint first, GLsizei count) {
         glTexCoordPointer(pending_fixed_texcoord_size, GL_FLOAT, 0, fixed_texcoord_buf);
     }
 
-    // No-op (devuelve 0) a menos que se haya compilado con
-    // ENABLE_POSTPROCESS_SHADER Y este sea el blit del compositor marcado por
-    // glTexSubImage2D_wrapper -- en ese caso dibuja ella misma el quad (con
-    // su propia geometria, ver postprocess.c) y hay que saltearse el
-    // glDrawArrays original de mas abajo.
+    /**
+     * @brief Lets the post-process module draw the compositor quad itself, skipping the original glDrawArrays.
+     * @return Non-zero (and returns early) only when built with ENABLE_POSTPROCESS_SHADER and this is the flagged compositor blit.
+     * @note Ver docs/loader/dynlib.md para el razonamiento.
+     */
     if (postprocess_try_draw()) return;
 
     glDrawArrays(mode, first, count);
@@ -494,13 +499,11 @@ FILE* fopen_hook(const char* path, const char* mode) {
     return fopen(new_path, mode);
 }
 
-// struct stat con el layout de bionic (Android ARM 32-bit, NDK android-9) --
-// NO es el de newlib/vitasdk. El motor lee directamente st_mode en el offset
-// 16 y st_size en el 48 (confirmado desensamblando MC_fsFileAttribute, el
-// unico call site de stat en libzenonia2.so). Pasarle el struct stat de
-// newlib dejaba esos offsets con basura de stack: al cargar una partida,
-// MC_fsFileAttribute devolvia un "tamano" que era un puntero del heap
-// (MALLOC FAILED FOR SIZE 0x81340CE0) y el motor crasheaba.
+/**
+ * @brief `struct stat` laid out to match bionic (Android ARM 32-bit, NDK android-9) field offsets.
+ * @details Not the newlib/vitasdk layout — the engine reads st_mode/st_size at bionic's fixed offsets directly.
+ * @note Ver docs/loader/dynlib.md para el razonamiento (crash de MC_fsFileAttribute con el layout de newlib).
+ */
 typedef struct {
     uint64_t st_dev;         // 0
     uint8_t  __pad0[4];      // 8

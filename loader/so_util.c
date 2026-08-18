@@ -19,21 +19,24 @@ extern void game_log(const char *fmt, ...);
 extern void fatal_error(const char *fmt, ...);
 
 #ifdef EMULATOR_BUILD
-// Vita3K does not implement the kuKernelCpuUnrestrictedMemcpy NID either; under
-// the emulator all the memory we write into here is memory we allocated
-// ourselves (see the EMULATOR_BUILD path in _so_load), so a plain memcpy works.
+/**
+ * @def ku_memcpy
+ * @brief EMULATOR_BUILD: plain memcpy (Vita3K lacks kuKernelCpuUnrestrictedMemcpy).
+ * @note Ver docs/loader/so_util.md para el razonamiento de diseño.
+ */
 #define ku_memcpy(dst, src, n) memcpy((dst), (src), (n))
-// Nor does it implement kuKernelFlushCaches. Vita3K's CPU emulation always
-// reads fresh memory (no real instruction cache to keep coherent), so this is
-// a safe no-op under EMULATOR_BUILD.
+/**
+ * @def ku_flush_caches
+ * @brief EMULATOR_BUILD: no-op (Vita3K lacks kuKernelFlushCaches).
+ * @note Ver docs/loader/so_util.md para el razonamiento de diseño.
+ */
 #define ku_flush_caches(addr, size) ((void)0)
 #else
-// Real hardware: unprivileged sceKernelAllocMemBlock() cannot create
-// executable memory (W^X enforced by the MMU) -- kuKernelAllocMemBlock is
-// kubridge's kernel-level allocator that can, and kuKernelCpuUnrestrictedMemcpy/
-// kuKernelFlushCaches are needed to write into and sync that memory. Without
-// this, the text segment ends up RW-only and any attempt to execute code from
-// it faults with a Prefetch Abort exactly at the first instruction fetched.
+/**
+ * @def ku_memcpy
+ * @brief Real hardware: kubridge's kernel-level copy into W^X-protected executable memory.
+ * @note Ver docs/loader/so_util.md para el razonamiento de diseño.
+ */
 #define ku_memcpy(dst, src, n) kuKernelCpuUnrestrictedMemcpy((dst), (src), (n))
 #define ku_flush_caches(addr, size) kuKernelFlushCaches((addr), (size))
 #endif
@@ -147,13 +150,12 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
     mod->shstr = (char *)((uintptr_t)so_data + mod->shdr[mod->ehdr->e_shstrndx].sh_offset);
 
 #ifdef EMULATOR_BUILD
-    // Vita3K does not implement kuKernelAllocMemBlock (fixed-address allocation),
-    // which the code below normally relies on to place the patch/text/data blocks
-    // at exact, contiguous addresses (mirroring a single mmap of the whole module
-    // image, like a real ELF loader would do). Since we can't request specific
-    // addresses under Vita3K, reserve ONE big block up front sized to fit the
-    // whole image contiguously, and sub-allocate patch/text/data regions from it
-    // via pointer arithmetic instead of separate fixed-address OS allocations.
+    /**
+     * @brief EMULATOR_BUILD: single contiguous arena, sub-allocated by pointer arithmetic.
+     * @details Vita3K lacks fixed-address allocation (kuKernelAllocMemBlock), so patch/text/data
+     *          regions are carved out of one big reservation instead of separate OS allocations.
+     * @note Ver docs/loader/so_util.md para el razonamiento de diseño.
+     */
     size_t emu_patch_size = 0;
     uintptr_t emu_cursor = 0; // relative distance from the text segment's start
     for (int i = 0; i < mod->ehdr->e_phnum; i++) {
@@ -332,8 +334,10 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
     return 0;
 
 #ifdef EMULATOR_BUILD
-    // patch/text/data_blockid[] all alias the single emu_blockid arena here,
-    // so only free it once instead of once per alias.
+    /**
+     * @brief EMULATOR_BUILD cleanup: patch/text/data_blockid[] all alias emu_blockid, freed once.
+     * @note Ver docs/loader/so_util.md para el razonamiento de diseño.
+     */
     err_free_data:
     err_free_text:
     if (mod->patch_blockid >= 0)
@@ -646,6 +650,12 @@ uintptr_t so_alloc_arena(so_module *so, uintptr_t range, uintptr_t dst, size_t s
     return (uintptr_t)NULL;
 }
 
+/**
+ * @brief Rewrites an LDMIA at @p dst into individual LDR loads plus a trampoline back.
+ * @param mod Module the instruction belongs to (used for trampoline space allocation).
+ * @param dst Address of the LDMIA instruction to patch.
+ * @note Ver docs/loader/so_util.md para el razonamiento de diseño (orden de carga del registro base).
+ */
 static void trampoline_ldm(so_module *mod, uint32_t *dst) {
     uint32_t trampoline[1];
     uint32_t funct[20] = {0xFAFAFAFA};
@@ -658,8 +668,10 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
     uint32_t stored = 0;
     for (int i = 0; i < 16; i++) {
         if (bitMask & (1 << i)) {
-            // If the register we're reading the offset from is the same as the one we're writing,
-            // delay it to the very end so that the base pointer isn't clobbered
+            /**
+             * @brief Defers the base register's own load until last to avoid clobbering it early.
+             * @note Ver docs/loader/so_util.md para el razonamiento de diseño.
+             */
             if (baseReg == i)
                 stored = LDR_OFFS(i, baseReg, cur).raw;
             else

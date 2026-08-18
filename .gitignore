@@ -59,3 +59,7 @@ log_*.txt
 PS Vita
 zenonia2_translation/
 tools/
+porting_tools/
+psvita-port-toolkit/
+extracted_toolkit/
+scripts

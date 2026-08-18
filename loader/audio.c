@@ -36,8 +36,11 @@ extern void game_log(const char *fmt, ...);
 #define AUDIO_RATE 22050
 #define AUDIO_GRAIN 512
 
-// 1 BGM + 1 stream + 4 SFX simultaneos (SoundPool de Android se creaba con
-// pocos streams; 4 alcanza de sobra para este juego)
+/**
+ * @def NUM_VOICES
+ * @brief Total de voces de mezcla: 1 BGM + 1 stream + 4 SFX simultáneos.
+ * @note Ver docs/loader/audio.md para el razonamiento de diseño.
+ */
 #define VOICE_BGM    0
 #define VOICE_STREAM 1
 #define VOICE_SFX0   2
@@ -57,13 +60,19 @@ typedef struct {
     float gain;
 } voice_t;
 
-// Pedido de reproduccion encolado por audio_play() (llamada desde el thread de
-// render via OnSoundPlay). El fopen()/ov_open() de una voz nueva es I/O a
-// almacenamiento y puede tardar varios ms -- si se hiciera ahi mismo, cada
-// sonido disparado a mitad de frame (p.ej. el golpe de un poder contra un
-// objetivo) trababa el thread de render entero. Esta cola deja que
-// audio_play() solo encole y el thread mezclador (audio_thread) haga el I/O
-// pesado de forma asincrona.
+/**
+ * @struct play_request_t
+ * @brief Pedido de reproducción de sonido pendiente de procesar.
+ *
+ * Encolado por audio_play() y drenado de forma asíncrona por audio_thread
+ * (ver handle_play_request()).
+ *
+ * @var play_request_t::snd_id  ID de sonido (índice en sound/sNNN.ogg).
+ * @var play_request_t::vol     Volumen 0-100.
+ * @var play_request_t::is_loop No cero si debe reproducirse en loop.
+ *
+ * @note Ver docs/loader/audio.md para el razonamiento de diseño.
+ */
 typedef struct {
     int snd_id;
     int vol;
@@ -126,9 +135,13 @@ static int voice_decode(voice_t *v, int16_t *out, int frames) {
     return done;
 }
 
-// Abre y decodea el header de una voz nueva (fopen + ov_open -- I/O de
-// almacenamiento, puede tardar varios ms) y la asigna a un canal. Corre
-// SIEMPRE en audio_thread, nunca en el thread que llama a audio_play().
+/**
+ * @brief Abre, decodea el header y asigna a un canal una voz de reproducción.
+ * @param req Pedido de reproducción a procesar.
+ * @pre Debe ejecutarse únicamente en audio_thread, nunca en el hilo llamador
+ *      de audio_play().
+ * @note Ver docs/loader/audio.md para el razonamiento de diseño.
+ */
 static void handle_play_request(const play_request_t *req) {
     char path[128];
     snprintf(path, sizeof(path), SND_DIR "/s%03d.ogg", req->snd_id);
@@ -159,23 +172,30 @@ static void handle_play_request(const play_request_t *req) {
 
     sceKernelLockMutex(audio_mutex, 1, NULL);
 
+    /**
+     * @brief Selección de voz destino según categoría (SFX/BGM/stream).
+     * @note Replica la semántica de SoundPool/mBgmPlayer/mPlayer de
+     *       NexusSound.java. Ver docs/loader/audio.md para el razonamiento.
+     */
     voice_t *target = NULL;
     if (is_sfx_id(req->snd_id)) {
-        // SoundPool: buscar una voz SFX libre; si no hay, pisar la primera
         for (int i = VOICE_SFX0; i < NUM_VOICES; i++)
             if (!voices[i].active) { target = &voices[i]; break; }
         if (!target) target = &voices[VOICE_SFX0];
     } else if (req->is_loop) {
-        target = &voices[VOICE_BGM];    // mBgmPlayer: corta la musica anterior
+        target = &voices[VOICE_BGM];
     } else {
-        target = &voices[VOICE_STREAM]; // mPlayer: corta el stream anterior
+        target = &voices[VOICE_STREAM];
     }
 
     voice_close(target);
     target->vf = vf;
     target->loop = req->is_loop;
     target->channels = vi->channels;
-    // vol llega 0-100 (observado 50); MAX_VOLUME=80 en NexusSound. Escala lineal.
+    /**
+     * @brief Escala lineal de ganancia a partir de vol (0-100).
+     * @note Ver docs/loader/audio.md para el razonamiento de diseño.
+     */
     target->gain = req->vol > 0 ? (req->vol > 100 ? 1.0f : req->vol / 100.0f) : 1.0f;
     target->active = 1;
 
@@ -223,7 +243,11 @@ static int audio_thread(SceSize args, void *argp) {
         }
         sceKernelUnlockMutex(audio_mutex, 1);
 
-        // Bloquea hasta que el hardware consumio el bloque: marca el ritmo del loop
+        /**
+         * @brief Envía el bloque mezclado al hardware de audio.
+         * @note Bloqueante: marca el ritmo del loop mezclador. Ver
+         *       docs/loader/audio.md para el razonamiento de diseño.
+         */
         sceAudioOutOutput(audio_port, mix);
     }
     return 0;
@@ -247,9 +271,15 @@ void audio_init(void) {
     }
 }
 
-// Llamada desde el thread de render (via OnSoundPlay, ver java.c) -- debe ser
-// rapida y jamas bloquear en I/O. Solo encola el pedido; audio_thread hace el
-// fopen()/ov_open() real de forma asincrona (ver handle_play_request arriba).
+/**
+ * @brief Encola un pedido de reproducción de sonido (OnSoundPlay).
+ * @param snd_id  ID de sonido (índice en sound/sNNN.ogg).
+ * @param vol     Volumen 0-100.
+ * @param is_loop No cero si debe reproducirse en loop.
+ * @pre Llamada desde el thread de render (ver java.c); debe ser rápida y
+ *      jamás bloquear en I/O — solo encola, ver handle_play_request().
+ * @note Ver docs/loader/audio.md para el razonamiento de diseño.
+ */
 void audio_play(int snd_id, int vol, int is_loop) {
     if (audio_port < 0) return;
 

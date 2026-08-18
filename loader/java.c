@@ -21,15 +21,18 @@
 
 extern void game_log(const char *fmt, ...);
 
-// readAssets/isAssetExist are always called with the same relative path (the
-// engine calls isAssetExist(path) to decide whether to bother calling
-// readAssets(path)), so both must resolve identically. The exact on-console
-// layout wasn't confirmed yet when readAssets was first written -- try the
-// bare path first (ux0:data/zenonia-2/<name>), then fall back to the
-// assets/-prefixed one that dynlib.c's fopen_hook/stat_hook/access_hook use
-// for everything else (ux0:data/zenonia-2/assets/<name>), and remember
-// whichever one actually resolves so the two functions never disagree with
-// each other for the same file.
+/**
+ * @brief Resolves a game-relative asset name to an on-disk path.
+ *
+ * Tries `ux0:data/zenonia-2/<name>` first, then falls back to
+ * `ux0:data/zenonia-2/assets/<name>`.
+ *
+ * @param name Asset-relative path as passed by the engine.
+ * @param out Buffer to receive the resolved absolute path.
+ * @param out_size Size of @p out.
+ * @return 1 if a path was resolved (written to @p out), 0 otherwise.
+ * @note Ver docs/loader/java.md#zenonia_resolve_asset_path-línea-24 para el razonamiento de diseño.
+ */
 static int zenonia_resolve_asset_path(const char *name, char *out, size_t out_size) {
     snprintf(out, out_size, "ux0:data/zenonia-2/%s", name);
     if (access(out, F_OK) == 0) return 1;
@@ -46,11 +49,11 @@ static int zenonia_resolve_asset_path(const char *name, char *out, size_t out_si
 
 NameToMethodID nameToMethodId[] = {
     { 1, "readAssets", METHOD_TYPE_OBJECT },
-    // Real typo in libzenonia2.so itself (confirmed via `strings` -- both
-    // "readAssets" and "readAssete" exist in the binary) and it's the one
-    // actually looked up during boot per a real device log. Same handler,
-    // just registered under both names since we don't know yet whether the
-    // correctly-spelled one is also called later.
+    /**
+     * @brief Alias of "readAssets" under its misspelled form.
+     * @note Both spellings exist in libzenonia2.so; see
+     *       docs/loader/java.md#nametomethodid--entrada-readassete-línea-49.
+     */
     { 3, "readAssete", METHOD_TYPE_OBJECT },
     { 2, "isAssetExist", METHOD_TYPE_INT },
     { 4, "getGLOptionLinear", METHOD_TYPE_INT },
@@ -59,46 +62,53 @@ NameToMethodID nameToMethodId[] = {
     { 7, "getAbsolueFilePath", METHOD_TYPE_OBJECT },
     { 8, "OnUIStatusChange", METHOD_TYPE_VOID },
     { 9, "OnSoundPlay", METHOD_TYPE_VOID },
-    // OnStopSound corta todo el audio (audio.c); los otros dos son UI de Java
-    // sin equivalente aca, no-ops para que no spameen "not found" en el log.
+    /**
+     * @brief Stop-all-audio callback; dispatches to audio.c.
+     * @note "hideLoadingDialog"/"OnShowSaveButton" are Java-UI-only, no
+     *       native equivalent. See
+     *       docs/loader/java.md#nametomethodid--entrada-onstopsound-línea-62.
+     */
     { 10, "OnStopSound", METHOD_TYPE_VOID },
     { 11, "hideLoadingDialog", METHOD_TYPE_VOID },
     { 12, "OnShowSaveButton", METHOD_TYPE_VOID },
-    // Vita no tiene motor de vibracion -- no-ops legitimos. Registrados
-    // ademas porque un metodo sin registrar hace que GetStaticMethodID
-    // devuelva NULL, y el motor no cachea ese NULL: vuelve a intentar el
-    // lookup en cada llamada (p.ej. cada golpe en combate intenta vibrar),
-    // spameando "[JNI ERR] ... not found" con su fflush a disco por llamada
-    // -- visto en logs/log_1784331019.txt (43 veces solo en esa sesion,
-    // concentradas durante gameplay real). Registrar el metodo (aunque sea
-    // no-op) hace que el motor obtenga un id valido y lo cachee, cortando el
-    // spam de raiz.
+    /**
+     * @brief Vibration callback; no-op (Vita has no vibration engine).
+     * @note Must stay registered so GetStaticMethodID caches a valid id
+     *       instead of NULL, which would otherwise force a fresh lookup
+     *       (and log spam) on every call. See
+     *       docs/loader/java.md#nametomethodid--entrada-onvibrate-línea-67.
+     */
     { 13, "OnVibrate", METHOD_TYPE_VOID },
     { 14, "getPhoneNumber", METHOD_TYPE_OBJECT },
     { 15, "TrackEventDispatch", METHOD_TYPE_VOID },
 };
 
-// Estado de UI que reporta el motor via OnUIStatusChange. main.c lo usa para
-// saber cuando dejar de mostrar el splash: 0=logo y 1=titulo son pantallas
-// que en Android dibujaba la UI de Java (invisibles aca); a partir de 2 el
-// motor nativo ya dibuja contenido real (menu/juego).
+/**
+ * @brief UI state last reported by the engine via OnUIStatusChange.
+ *
+ * 0 = logo, 1 = title (Java-UI screens, invisible here), >=2 = native
+ * engine content (menu/game). Consumed by main.c to decide when to stop
+ * drawing the splash overlay.
+ * @note Ver docs/loader/java.md#g_ui_status-línea-81 para el razonamiento de diseño.
+ */
 volatile int g_ui_status = -1;
 
-// The engine (built against an old pre-ART NDK) reads the jbyteArray this
-// returns by reaching directly into Dalvik's internal ArrayObject layout
-// (16-byte header, then raw element data) instead of going through
-// GetByteArrayElements -- confirmed by the original hand-rolled loader code
-// this replaces. FalsoJNI's own NewByteArray/JavaDynArray uses a different
-// layout, so this can't go through it: it must keep returning a raw block
-// shaped like Dalvik's ArrayObject.
-// readAssets/isAssetExist se llaman muy seguido durante gameplay real (no
-// solo en el boot) -- loguear cada llamada aca hacia un fflush() a disco por
-// llamada en el thread de render (visto en logs/log_1784331019.txt: 445+477
-// lineas de estas dos funciones sobre 1355 totales de esa sesion, muchas
-// durante juego activo). Los logs de la ruta feliz (entrada, tamaño, éxito)
-// se cortan a los primeros N para debug de arranque; los de error genuino
-// (archivo no abre, tamaño corrupto) quedan sin cortar porque son señal de un
-// bug real y no deberían repetirse en operación normal.
+/**
+ * @brief Reads an asset file and returns it as a raw Dalvik-shaped byte array.
+ *
+ * The returned block is NOT a FalsoJNI jbyteArray: it mimics Dalvik's
+ * internal ArrayObject layout directly (16-byte header + raw element data)
+ * because the engine reads it that way instead of via GetByteArrayElements.
+ * @note Ver docs/loader/java.md#zenonia_readassets--layout-de-jbytearray-línea-87
+ *       para el razonamiento de diseño.
+ *
+ * @param id Unused (dispatch-table method id).
+ * @param args Varargs; expects a single jstring (asset-relative path).
+ * @return Pointer to a Dalvik-shaped ArrayObject block, or NULL on failure.
+ * @note Logging is capped at READASSETS_LOG_CAP happy-path calls; genuine
+ *       error logs (open/size failures) are never capped. See
+ *       docs/loader/java.md#readassets_log--límite-de-logging-línea-94.
+ */
 static int readassets_log = 0;
 #define READASSETS_LOG_CAP 20
 
@@ -123,25 +133,22 @@ jobject Zenonia_readAssets(jmethodID id, va_list args) {
         return NULL;
     }
 
-    // fstat instead of fseek(SEEK_END)+ftell: a bad size here (garbage,
-    // sometimes literally bytes from the path string itself -- seen on a
-    // real device as a "malloc FAILED FOR SIZE 1952539695" where that number
-    // decoded to the ASCII text "/dat") was feeding a huge bogus length into
-    // the engine's own allocator downstream (MC_knlCalloc), crashing it.
+    /**
+     * @brief Get file size via fstat (not fseek+ftell).
+     * @note Ver docs/loader/java.md#zenonia_readassets--fstat-en-vez-de-fseekftell-línea-126
+     *       para el razonamiento de diseño.
+     */
     struct stat st;
     long size = -1;
     if (fstat(fileno(f), &st) == 0) {
         size = st.st_size;
     }
 
-    // Always log size + first bytes: several .zt1 assets are a custom
-    // compressed format (4-byte compressed size, 4-byte uncompressed size,
-    // then zlib data) that the engine reads directly, so a file that's the
-    // wrong content (not corrupted size, just plain wrong bytes -- e.g. a
-    // botched FTP transfer swapped in something else at this exact path)
-    // won't be caught by the size check below but will still corrupt the
-    // engine's own decompression step downstream. Logging the raw header
-    // bytes here makes that visible without needing another crash dump.
+    /**
+     * @brief Peek and log the first 8 header bytes unconditionally.
+     * @note Ver docs/loader/java.md#zenonia_readassets--log-de-tamaño-y-primeros-bytes-línea-137
+     *       para el razonamiento de diseño.
+     */
     unsigned char peek[8] = {0};
     long cur = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -178,20 +185,20 @@ jobject Zenonia_readAssets(jmethodID id, va_list args) {
     return array_obj;
 }
 
-// Registered because a not-found method ID makes FalsoJNI's methodIntCall()
-// return -1 (see FalsoJNI_ImplBridge.c) -- a nonzero value the engine reads
-// as a C-style boolean "true" (file exists), when it should be a clean 0.
-// That false positive is what was crashing the engine: it went on to treat
-// a nonexistent ptc/000.ptc as present and load it, faulting deep inside a
-// kernel call downstream (confirmed via vita-parse-core on a real crash
-// dump -- LR resolved to CMvResourceMgr::LoadAllPTCData()).
-// El motor llama isAssetExist repetidamente durante gameplay real, no solo en
-// carga -- confirmado en logs/log_1784331019.txt: 227 misses solo de
-// "sound/*.mmf" (formato de vibracion de Android que este puerto nunca provee,
-// asi que siempre da "not found", una y otra vez sin cachear el resultado del
-// lado del motor). Cada llamada antes hacia un fflush() a disco sin condicion,
-// en el thread de render, sea que el asset exista o no. Cortado a los
-// primeros N para debug de arranque.
+/**
+ * @brief Checks whether an asset exists and returns its size.
+ *
+ * Must be registered (not left as "not found") so a lookup miss on this
+ * method ID can never be misread by the engine as a truthy result.
+ * @note Ver docs/loader/java.md#zenonia_isassetexist--registro-obligatorio-por-bug-de-falso-positivo-línea-181
+ *       para el razonamiento de diseño.
+ *
+ * @param id Unused (dispatch-table method id).
+ * @param args Varargs; expects a single jstring (asset-relative path).
+ * @return File size in bytes if it exists (and is not a directory), 0 otherwise.
+ * @note Logging is capped at ISASSETEXIST_LOG_CAP calls. See
+ *       docs/loader/java.md#isassetexist_log--límite-de-logging-línea-188.
+ */
 static int isassetexist_log = 0;
 #define ISASSETEXIST_LOG_CAP 20
 
@@ -232,26 +239,45 @@ jobject Zenonia_getPhoneModel(jmethodID id, va_list args) {
     return NULL;
 }
 
+/**
+ * @brief Returns the base data path (engine's misspelled "getAbsolueFilePath").
+ * @return A Dalvik JNI string (raw char pointer, per FalsoJNI's string
+ *         representation) with a trailing slash, so the engine's own
+ *         concatenation of the asset name yields a valid absolute path.
+ * @note Ver docs/loader/java.md#zenonia_getabsoluefilepath-línea-236 para el razonamiento de diseño.
+ */
 jobject Zenonia_getAbsolueFilePath(jmethodID id, va_list args) {
-    // Engine misspelled "Absolute" as "Absolue"
-    // Returns a Dalvik JNI string, which FalsoJNI implements as a char pointer
-    // We return the base path with a trailing slash so when the engine concatenates
-    // the asset name, it forms a valid absolute path.
     return (jobject) "ux0:data/zenonia-2/";
 }
+
+extern void update_virtual_buttons(int status);
+extern void (*SetShowSaveButton)(void *env, void *obj, int show);
 
 void Zenonia_OnUIStatusChange(jmethodID id, va_list args) {
     int status = va_arg(args, int);
     game_log("[Java] OnUIStatusChange: %d\n", status);
     g_ui_status = status;
+    update_virtual_buttons(status);
+}
+
+void Zenonia_OnShowSaveButton(jmethodID id, va_list args) {
+#ifndef HIDE_VIRTUAL_BUTTONS
+    if (SetShowSaveButton)
+        SetShowSaveButton(&jni, NULL, 1);
+#endif
 }
 
 void Zenonia_VoidNoop(jmethodID id, va_list args) {
 }
 
-// Firma real (Natives.java): OnSoundPlay(int sndID, int vol, boolean isLoop)
-// -- el segundo parametro es VOLUMEN, no loop (los logs viejos lo etiquetaban
-// al reves). Despacha al mezclador de audio.c.
+/**
+ * @brief Dispatches a sound-play request to audio.c's mixer.
+ *
+ * Real signature (Natives.java): OnSoundPlay(int sndID, int vol, boolean isLoop).
+ * @param id Unused (dispatch-table method id).
+ * @param args Varargs: sndID (int), vol (int), isLoop (jboolean/int).
+ * @note Ver docs/loader/java.md#zenonia_onsoundplay-línea-263 para el razonamiento de diseño.
+ */
 void Zenonia_OnSoundPlay(jmethodID id, va_list args) {
     int snd_id = va_arg(args, int);
     int vol = va_arg(args, int);
@@ -287,7 +313,7 @@ MethodsVoid methodsVoid[] = {
     { 9, Zenonia_OnSoundPlay },
     { 10, Zenonia_OnStopSound },
     { 11, Zenonia_VoidNoop },
-    { 12, Zenonia_VoidNoop },
+    { 12, Zenonia_OnShowSaveButton },
     { 13, Zenonia_VoidNoop }, // OnVibrate: Vita no tiene motor de vibracion
     { 15, Zenonia_VoidNoop }, // TrackEventDispatch: telemetria de Android, sin equivalente
 };

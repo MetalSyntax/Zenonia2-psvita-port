@@ -27,8 +27,11 @@
 #include <taihen.h>
 #include <vitaGL.h>
 
-// De kubridge.h (no se incluye entero: sus structs SceKernelAddrPair/etc.
-// chocan con los del vitasdk actual; so_util.c ya lo enlaza igual)
+/**
+ * @brief kubridge's unrestricted memcpy, declared manually instead of
+ *        including kubridge.h in full.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 extern int kuKernelCpuUnrestrictedMemcpy(void *dst, const void *src,
                                          SceSize len);
 
@@ -37,17 +40,20 @@ extern int kuKernelCpuUnrestrictedMemcpy(void *dst, const void *src,
 
 FILE *log_file = NULL;
 
-// Once vitaGL owns the display, debugScreen's raw framebuffer writes must not
-// keep running alongside it -- both would fight over the same framebuffer.
+/**
+ * @brief Set once vitaGL takes ownership of the display.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 int gl_active = 0;
 
 int _newlib_heap_size_user = 128 * 1024 * 1024; // 128 MB for newlib (malloc)
 unsigned int sceLibcHeapSize =
     4 * 1024 * 1024; // 4 MB for SCE Libc (system libs)
 
-// One log file per run, named with its start timestamp, inside logs/ --
-// keeps a full history across test runs instead of overwriting the same
-// log.txt every time (see psvita-porting skill's hardware_debugging.md).
+/**
+ * @brief Opens a new timestamped log file under LOG_DIR for this run.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 void init_log() {
   sceIoMkdir(LOG_DIR, 0777); // fails silently if it already exists
 
@@ -62,8 +68,11 @@ void init_log() {
   }
 }
 
-// Solo a archivo: la consola de debug en pantalla ya no se usa durante el
-// arranque normal (el usuario ve el splash de bg0 en su lugar, ver splash_*).
+/**
+ * @brief Formats and appends a line to log_file (file-only, no screen output).
+ * @param fmt printf-style format string.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 void game_log(const char *fmt, ...) {
   va_list list;
   char string[512];
@@ -87,8 +96,10 @@ void fatal_error(const char *fmt, ...) {
   va_end(list);
 
   game_log("[FATAL] %s\n", string);
-  // La pantalla de debug se inicializa recien aca: en un arranque sano no
-  // se muestra nunca ningun texto por pantalla.
+  /**
+   * @note debugScreen is lazily initialized here only. Ver docs/loader/main.md
+   *       para el razonamiento de diseño.
+   */
   psvDebugScreenInit();
   printf("[FATAL] %s\n", string);
   sceKernelDelayThread(10 * 1000 * 1000); // 10s so it's readable before dying
@@ -121,13 +132,58 @@ void (*setInputEvent)(void *env, void *obj, int type, int p1, int p2);
 void (*NativeResumeClet)(void *env, void *obj);
 void (*handleCletEvent)(void *env, void *obj, int type, int p1, int p2);
 
-// --- Input: replica del protocolo del APK (NexusGLRenderer + UIFullTouch +
-// Zenonia2UIControllerView, confirmado por decompilacion con jadx). Cada
-// evento se entrega DOS veces, igual que en Java: setInputEvent() inmediato
-// al generarse, y handleCletEvent() justo antes del siguiente NativeRender
-// (NexusGLRenderer.drawFrame -> sendHandleCletEvent). El touch va en el
-// espacio interno del juego de 400x240 (UIFullTouch.convertScreenX/Y), no en
-// pixeles de pantalla.
+// Virtual buttons JNI Pointers
+void (*SetDpadDrawingBlock)(void *env, void *obj, int block) = NULL;
+void (*SetShowDirectionButton)(void *env, void *obj, int show) = NULL;
+void (*SetShowSelectButton)(void *env, void *obj, int show) = NULL;
+void (*SetShowBackButton)(void *env, void *obj, int show) = NULL;
+void (*SetShowGameMenuButton)(void *env, void *obj, int show) = NULL;
+void (*SetShowMapButton)(void *env, void *obj, int show) = NULL;
+void (*SetShowSkipButton)(void *env, void *obj, int show) = NULL;
+void (*SetShowSaveButton)(void *env, void *obj, int show) = NULL;
+void (*SetShowResetButton)(void *env, void *obj, int show) = NULL;
+void (*SetDpadPosition)(void *env, void *obj, int x, int y, int size) = NULL;
+void (*SetButtonPosition)(void *env, void *obj, int x, int y, int size) = NULL;
+
+void update_virtual_buttons(int status) {
+#ifndef HIDE_VIRTUAL_BUTTONS
+  if (!SetShowDirectionButton) return;
+  void *env = &jni;
+
+  if (status >= 3) {
+    // In-game: gameplay (3) y subpantallas de juego (6, 8, etc.)
+    if (SetDpadDrawingBlock) SetDpadDrawingBlock(env, NULL, 0);
+    if (SetDpadPosition) SetDpadPosition(env, NULL, 4, 123, 1);
+    if (SetButtonPosition) SetButtonPosition(env, NULL, 325, 163, 1);
+    if (SetShowDirectionButton) SetShowDirectionButton(env, NULL, 1);
+    if (SetShowSelectButton) SetShowSelectButton(env, NULL, 1);
+    if (SetShowGameMenuButton) SetShowGameMenuButton(env, NULL, (status == 3) ? 1 : 0);
+    if (SetShowMapButton) SetShowMapButton(env, NULL, (status == 3) ? 1 : 0);
+    if (SetShowSaveButton) SetShowSaveButton(env, NULL, (status == 3) ? 1 : 0);
+    if (SetShowBackButton) SetShowBackButton(env, NULL, (status == 6 || status == 8) ? 1 : 0);
+    if (SetShowSkipButton) SetShowSkipButton(env, NULL, (status == 7) ? 1 : 0);
+  } else {
+    // Menú principal (2), Título (1), Logo (0): completamente apagados
+    if (SetShowDirectionButton) SetShowDirectionButton(env, NULL, 0);
+    if (SetShowSelectButton) SetShowSelectButton(env, NULL, 0);
+    if (SetShowGameMenuButton) SetShowGameMenuButton(env, NULL, 0);
+    if (SetShowMapButton) SetShowMapButton(env, NULL, 0);
+    if (SetShowSaveButton) SetShowSaveButton(env, NULL, 0);
+    if (SetShowBackButton) SetShowBackButton(env, NULL, 0);
+    if (SetShowSkipButton) SetShowSkipButton(env, NULL, 0);
+    if (SetShowResetButton) SetShowResetButton(env, NULL, 0);
+  }
+#endif
+}
+
+/**
+ * @defgroup input Input handling
+ * @brief APK input protocol replica: each event is queued via
+ *        queue_input_event() (setInputEvent) and later drained once per
+ *        frame via handleCletEvent() in the main loop. Touch coordinates are
+ *        in the game's internal 400x240 space, not screen pixels.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 
 // Eventos MH_* (NexusHal.java)
 #define MH_KEY_PRESSEVENT 2
@@ -169,8 +225,11 @@ static void queue_input_event(void *env, int type, int p1, int p2) {
   }
 }
 
-// Botones fisicos de la Vita -> teclas HAL que en el telefono generaba la UI
-// tactil de Java (dpad y botones en pantalla), que aca no existe.
+/**
+ * @brief Maps physical Vita buttons to the HAL keycodes Android's on-screen
+ *        touch UI would otherwise generate.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 static const struct {
   unsigned int btn;
   int hal;
@@ -183,17 +242,14 @@ static const struct {
 };
 #define BTN_MAP_COUNT (sizeof(btn_map) / sizeof(btn_map[0]))
 
-// --- Parches binarios al .so (aplicar despues de so_relocate/so_resolve y
-// ANTES de so_flush_caches, que sincroniza la cache de instrucciones) ---
-//
-// CMvLayerData::PreLoad+0x20 (VA 0xaec38): `cmp r3, #0; ble <skip>` donde r3
-// es el PUNTERO al buffer del mapa pasado como `long` (con signo). En Android
-// el heap vive en direcciones bajas (positivas) y el chequeo pasa; en Vita
-// nuestro heap newlib esta en 0x81xxxxxx, negativo como entero con signo, asi
-// que el motor "cree" que el buffer es invalido, saltea el calloc de las capas
-// del mapa y CMvMap::CreateMiniMap crashea despues leyendo la capa NULL
-// (Data abort confirmado con vita-parse-core: PC=CreateMiniMap+0xaa, R1=0).
-// Se cambia `ble` (0xdd27) por `beq` (0xd027): solo saltear si es NULL real.
+/**
+ * @brief Applies confirmed binary patches to the loaded .so in place.
+ * @param mod The loaded Zenonia 2 module (already relocated/resolved).
+ * @pre Must run after so_relocate()/so_resolve() and before so_flush_caches().
+ * @note Patches CMvLayerData::PreLoad (VA 0xaec38): `ble` -> `beq`, so the
+ *       map-layer NULL check is unsigned-safe on Vita's heap addresses.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 static void apply_so_patches(so_module *mod) {
   const uint16_t ble = 0xdd27, beq = 0xd027;
   uint16_t cur = *(uint16_t *)(mod->text_base + 0xaec38);
@@ -208,34 +264,63 @@ static void apply_so_patches(so_module *mod) {
                                 sizeof(beq));
   game_log("Parche aplicado: CMvLayerData::PreLoad ble->beq @ 0x%08x\n",
            (unsigned int)(mod->text_base + 0xaec38));
+
+#ifdef HIDE_VIRTUAL_BUTTONS
+  /**
+   * @brief Patches drawDpad (0x52980) and drawButton (0x52a50) to `bx lr`
+   *        so the mobile touch overlay is never drawn.
+   * @note Ver docs/loader/main.md para el razonamiento de diseño.
+   */
+  const uint16_t bx_lr = 0x4770;
+  const uint16_t dpad_expected = 0xb5f0; // push {r4, r5, r6, r7, lr}
+  uint16_t dpad_cur = *(uint16_t *)(mod->text_base + 0x52980);
+  if (dpad_cur == dpad_expected) {
+    kuKernelCpuUnrestrictedMemcpy((void *)(mod->text_base + 0x52980), &bx_lr,
+                                  sizeof(bx_lr));
+    game_log("Parche aplicado: drawDpad -> bx lr @ 0x%08x (botones virtuales ocultos)\n",
+             (unsigned int)(mod->text_base + 0x52980));
+  } else {
+    game_log("[PATCH] AVISO: bytes inesperados en drawDpad 0x52980 (0x%04x) -- omitido\n",
+             dpad_cur);
+  }
+
+  uint16_t btn_cur = *(uint16_t *)(mod->text_base + 0x52a50);
+  if (btn_cur == dpad_expected) {
+    kuKernelCpuUnrestrictedMemcpy((void *)(mod->text_base + 0x52a50), &bx_lr,
+                                  sizeof(bx_lr));
+    game_log("Parche aplicado: drawButton -> bx lr @ 0x%08x (botones virtuales ocultos)\n",
+             (unsigned int)(mod->text_base + 0x52a50));
+  } else {
+    game_log("[PATCH] AVISO: bytes inesperados en drawButton 0x52a50 (0x%04x) -- omitido\n",
+             btn_cur);
+  }
+#else
+  game_log("[PATCH] Botones virtuales habilitados (HUD táctil visible)\n");
+#endif
 }
 
-// --- Splash: logo.png/title.png/touch.png reales del APK (no el bg0 de
-// LiveArea, que tiene el logo achicado y centrado sobre bordes negros
-// pensados para la safe zone de LiveArea, no para pantalla completa) en
-// pantalla hasta que el motor dibuje contenido real. Los estados 0 (logo
-// Gamevil) y 1 (titulo) eran UI de Java en Android (aca se verian blancos);
-// a partir del estado 2 el motor nativo ya dibuja el menu. En el estado 1,
-// Android ademas parpadeaba touch.png ("toca para continuar", ver
-// Zenonia2UIControllerView.showTouchViewAnim/TouchViewTimeTask en el APK
-// decompilado) centrado horizontalmente a 3/4 de la pantalla -- sin ese
-// aviso la pantalla de titulo se ve "trabada" hasta que el usuario prueba
-// de tocar/apretar por su cuenta. g_ui_status lo actualiza java.c. ---
+/**
+ * @brief UI status published by java.c: 0 = logo, 1 = title, 2 = menu,
+ *        >=3 = in-game. Drives which splash overlay (if any) main() draws
+ *        on top of the engine's own output each frame.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 extern volatile int g_ui_status;
 
-// logo.png/title.png/touch.png se leen tal cual vienen de
-// apk_extract/res/drawable -- deployadas aparte por FTP (ver manage_vita.py)
-// bajo ux0:data/zenonia-2/drawable/, no empaquetadas en el VPK -- y se
-// decodifican/escalan en el dispositivo (ver image_load.c) en vez de leer
-// los .rgba crudos pre-generados que este reemplaza.
+/**
+ * @brief Directory holding the APK's original splash drawables, deployed
+ *        separately from the VPK and decoded at runtime (see image_load.c).
+ */
 #define DRAWABLE_DIR "ux0:data/zenonia-2/drawable"
 
 static GLuint logo_tex = 0;
 static GLuint title_tex = 0;
 static GLuint touch_tex = 0;
-// touch.png se escala por el mismo factor "cover" que title.png (800x480 ->
-// 960x544, factor 1.2x) en vez de un cover-fit propio calculado de su
-// aspecto, para que se vea consistente con el arte del titulo.
+/**
+ * @brief Cover-fit scale factor shared by title.png and touch.png (800x480
+ *        source -> 960x544 target).
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 #define TITLE_COVER_SCALE 1.2f
 #define TOUCH_TEX_W 310
 #define TOUCH_TEX_H 30
@@ -283,10 +368,11 @@ static void splash_draw(GLuint tex) {
   glPopMatrix();
 }
 
-// Aviso "toca para continuar" sobre el titulo (estado 1), replicando la
-// posicion original (centrado, topMargin = 3/4 de pantalla) y el parpadeo
-// de Zenonia2UIControllerView vía un pulso de alpha en vez del fade casi
-// imperceptible original (0.0 a 0.1 de alpha), para que se note en pantalla.
+/**
+ * @brief Draws the pulsing "touch to continue" prompt over the title screen.
+ * @param frame Monotonic frame counter, used to phase the alpha pulse.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 static void touch_draw(int frame) {
   if (!touch_tex)
     return;
@@ -311,10 +397,11 @@ static void touch_draw(int frame) {
   glEnableClientState(GL_VERTEX_ARRAY);
   glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 
-  // static: vitaGL no consume los vertex arrays de inmediato (los referencia
-  // para el command buffer de GXM), asi que un array en el stack local aca
-  // queda invalido para cuando efectivamente se dibuja -- eso generaba la
-  // franja diagonal de colores basura reportada tras agregar este quad.
+  /**
+   * @note `static`: vitaGL references vertex arrays lazily (GXM command
+   *       buffer), so a stack-local array here would be stale by draw time.
+   *       Ver docs/loader/main.md para el razonamiento de diseño.
+   */
   static const float verts[] = {TOUCH_TEX_X,
                                 TOUCH_TEX_Y,
                                 TOUCH_TEX_X + TOUCH_TEX_W,
@@ -330,15 +417,11 @@ static void touch_draw(int frame) {
 
   glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
   glDisable(GL_BLEND);
-  // El motor deja GL_TEXTURE_ENV_MODE en GL_REPLACE una sola vez al iniciar
-  // y nunca lo vuelve a tocar por frame (confirmado en el log: solo aparece
-  // una vez al arrancar, nunca de nuevo en el bucle de dibujo del quad
-  // compuesto 400x240). Bajo GL_REPLACE el color array por-vertice que el
-  // motor deja armado (glColorPointer, no usado por REPLACE) es irrelevante;
-  // si acá se deja en GL_MODULATE, ese color por-vertice (con valores no
-  // pensados para modular nada) empieza a multiplicar la textura del motor
-  // en TODOS los frames siguientes -- eso era la franja diagonal roja/verde
-  // reportada en menu y juego, no un problema de los vertex arrays.
+  /**
+   * @note Restores GL_TEXTURE_ENV_MODE to GL_REPLACE, the mode the engine
+   *       itself expects for every subsequent frame's compositor quad.
+   * @note Ver docs/loader/main.md para el razonamiento de diseño.
+   */
   glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
 
   glMatrixMode(GL_PROJECTION);
@@ -347,10 +430,11 @@ static void touch_draw(int frame) {
   glPopMatrix();
 }
 
-// Logs whatever sceDisplayGetFrameBuf currently reports as the buffer being
-// scanned out, so we can tell from the log alone (without relying on what's
-// visible on the TV/screen) whether vitaGL's swaps are actually taking over the
-// display from debugScreen's own buffer.
+/**
+ * @brief Logs the framebuffer currently reported by sceDisplayGetFrameBuf.
+ * @param label Prefix identifying the call site in the log.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 void log_active_frame_buf(const char *label) {
   SceDisplayFrameBuf fb;
   memset(&fb, 0, sizeof(fb));
@@ -361,41 +445,31 @@ void log_active_frame_buf(const char *label) {
            label, ret, fb.base, fb.width, fb.height, fb.pitch);
 }
 
+/**
+ * @brief Initializes vitaGL (no MSAA, no triple buffering) and caps the
+ *        swap rate to ~30 FPS via real VSync.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 void gl_init() {
-  // No MSAA / no triple buffering: this is the config known to work on
-  // real hardware (see port_progress.md for the Vita3K investigation --
-  // vitaGL init reliably crashes inside Vita3K's own call_import dispatcher
-  // regardless of these settings, confirmed to be an emulator-session
-  // instability rather than a port bug, so untested against real hardware
-  // yet by this specific build).
   vglUseTripleBuffering(GL_FALSE);
-  // vglInitExtended's return value is GL_TRUE only if the requested resolution
-  // had to be reduced to fit the display's max (res_fallback in vitaGL's own
-  // source) -- it is NOT a success/failure code, so GL_FALSE here (960x544 is
-  // the Vita's native resolution, never falls back) is the expected, healthy
-  // result. Do not treat it as an init failure.
+  /** @note GL_FALSE here is the expected result at native 960x544, not a
+   *        failure code — see docs/loader/main.md. */
   vglInitExtended(0, 960, 544, 6 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
 
-  // Cap a ~30 FPS con VSync real (sin tearing): la Vita refresca a ~59.94Hz,
-  // asi que interval=2 espera 2 vblanks por swap en vez de 1 (que daria un
-  // cap a ~60 FPS via vglWaitVblankStart). Sin este cap, con el compositor
-  // por-software corriendo mas rapido que antes (boost de clocks Fase 15 +
-  // conversion RGB565 optimizada Fase 16.1), el motor llegaba a ~40 FPS
-  // sostenidos -- mas rapido que el ritmo original (30 FPS, hardware Android
-  // de 2011) para el que esta calibrada la logica de juego, y sin VSync
-  // (tearing visible en el blit del compositor).
+  /** @note interval=2 caps to ~30 FPS (2 vblanks/swap @ ~59.94Hz) — ver
+   *        docs/loader/main.md para el razonamiento de diseño. */
   eglSwapInterval(eglGetDisplay(EGL_DEFAULT_DISPLAY), 2);
 
   gl_active = 1;
 }
 
+/**
+ * @brief Entry point: boosts clocks, loads/relocates/patches the .so,
+ *        initializes vitaGL/audio/JNI, and runs the main render/input loop.
+ * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ */
 int main() {
-  // Subir los clocks al maximo permitido por el firmware -- por defecto la
-  // Vita corre a 333MHz de CPU / 111MHz de bus / 166MHz de GPU. El motor
-  // hace bastante trabajo por-software (compositor 400x240, mixer de audio,
-  // parsing JNI), asi que este es el mismo boost estandar que usan
-  // practicamente todos los homebrews/ports (PPSSPP, etc.) y no tiene
-  // downside conocido en hardware real (solo mas consumo/calor).
+  /** @note Standard homebrew clock boost (default 333/111/166MHz). */
   scePowerSetArmClockFrequency(444);
   scePowerSetBusClockFrequency(222);
   scePowerSetGpuClockFrequency(166);
@@ -453,12 +527,36 @@ int main() {
     handleCletEvent = (void *)so_symbol(
         &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_handleCletEvent");
 
+    SetDpadDrawingBlock = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetDpadDrawingBlock");
+    SetShowDirectionButton = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetShowDirectionButton");
+    SetShowSelectButton = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetShowSelectButton");
+    SetShowBackButton = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetShowBackButton");
+    SetShowGameMenuButton = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetShowGameMenuButton");
+    SetShowMapButton = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetShowMapButton");
+    SetShowSkipButton = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetShowSkipButton");
+    SetShowSaveButton = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetShowSaveButton");
+    SetShowResetButton = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetShowResetButton");
+    SetDpadPosition = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetDpadPosition");
+    SetButtonPosition = (void *)so_symbol(
+        &zenonia2_mod, "Java_com_gamevil_nexus2_Natives_SetButtonPosition");
+
     game_log(
         "Symbols: JNI_OnLoad=%p NativeInit=%p NativeRender=%p NativeResize=%p "
-        "setInputEvent=%p NativeResumeClet=%p handleCletEvent=%p\n",
+        "setInputEvent=%p NativeResumeClet=%p handleCletEvent=%p ShowDpad=%p ShowBtn=%p\n",
         (void *)Game_JNI_OnLoad, (void *)NativeInit, (void *)NativeRender,
         (void *)NativeResize, (void *)setInputEvent, (void *)NativeResumeClet,
-        (void *)handleCletEvent);
+        (void *)handleCletEvent, (void *)SetShowDirectionButton,
+        (void *)SetShowSelectButton);
 
     // Ejecutar la secuencia de inicio de Android
     game_log("Llamando JNI_OnLoad...\n");
@@ -467,6 +565,17 @@ int main() {
     game_log("Llamando NativeInit...\n");
     if (NativeInit)
       NativeInit(jniEnv, NULL);
+#ifndef HIDE_VIRTUAL_BUTTONS
+    if (SetDpadDrawingBlock)
+      SetDpadDrawingBlock(jniEnv, NULL, 0);
+    if (SetDpadPosition)
+      SetDpadPosition(jniEnv, NULL, 4, 123, 1);
+    if (SetButtonPosition)
+      SetButtonPosition(jniEnv, NULL, 325, 163, 1);
+    game_log("Botones virtuales inicializados: DpadPos=%p BtnPos=%p ShowDpad=%p\n",
+             (void *)SetDpadPosition, (void *)SetButtonPosition,
+             (void *)SetShowDirectionButton);
+#endif
     game_log("Llamando NativeResize...\n");
     if (NativeResize)
       NativeResize(jniEnv, NULL, 960, 544);
@@ -484,10 +593,16 @@ int main() {
     SceTouchData touch;
     int last_touch = 0;
     int last_tx = 0, last_ty = 0;
+    int active_touch_key = 0;
     unsigned int old_buttons = 0;
     int frame = 0;
+    int last_ui_status = -1;
 
     while (1) {
+      if (g_ui_status != last_ui_status) {
+        last_ui_status = g_ui_status;
+        update_virtual_buttons(g_ui_status);
+      }
       sceCtrlPeekBufferPositive(0, &pad, 1);
       sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1);
 
@@ -522,12 +637,59 @@ int main() {
         last_ty = y;
 
         if (!last_touch) {
+#ifndef HIDE_VIRTUAL_BUTTONS
+          if (g_ui_status >= 3) {
+            // Mapeo táctil a botones virtuales durante in-game
+            if (x <= 55 && y <= 50) {
+              // Pergamino / Mapa (esquina superior izquierda)
+              active_touch_key = (g_ui_status == 3) ? HAL_KEY_MAP : 0;
+            } else if (x >= 345 && y <= 50) {
+              // Bolso / Menú / Back (esquina superior derecha)
+              active_touch_key = HAL_KEY_BACK;
+            } else if (x >= 170 && x <= 230 && y <= 50) {
+              // Guardar / Save (arriba al centro)
+              active_touch_key = (g_ui_status == 3) ? HAL_KEY_SAVE : 0;
+            } else if (x >= 310 && y >= 140) {
+              // Botón de ataque / acción (esquina inferior derecha)
+              active_touch_key = HAL_KEY_OK;
+            } else if (x <= 130 && y >= 110) {
+              // D-Pad virtual (esquina inferior izquierda)
+              int dx = x - 58;
+              int dy = y - 178;
+              if (abs(dx) > abs(dy)) {
+                active_touch_key = (dx > 0) ? HAL_KEY_RIGHT : HAL_KEY_LEFT;
+              } else {
+                active_touch_key = (dy > 0) ? HAL_KEY_DOWN : HAL_KEY_UP;
+              }
+            } else {
+              active_touch_key = 0;
+            }
+
+            if (active_touch_key != 0) {
+              queue_input_event(jniEnv, MH_KEY_PRESSEVENT, active_touch_key, 0);
+            } else {
+              queue_input_event(jniEnv, MH_POINTER_PRESSEVENT, x, y);
+            }
+          } else {
+            active_touch_key = 0;
+            queue_input_event(jniEnv, MH_POINTER_PRESSEVENT, x, y);
+          }
+#else
           queue_input_event(jniEnv, MH_POINTER_PRESSEVENT, x, y);
+#endif
           last_touch = 1;
         }
-        // UIFullTouch no manda eventos de move: solo press/release
       } else if (last_touch) {
+#ifndef HIDE_VIRTUAL_BUTTONS
+        if (active_touch_key != 0) {
+          queue_input_event(jniEnv, MH_KEY_RELEASEEVENT, active_touch_key, 0);
+          active_touch_key = 0;
+        } else {
+          queue_input_event(jniEnv, MH_POINTER_RELEASEEVENT, last_tx, last_ty);
+        }
+#else
         queue_input_event(jniEnv, MH_POINTER_RELEASEEVENT, last_tx, last_ty);
+#endif
         last_touch = 0;
       }
 
@@ -546,9 +708,10 @@ int main() {
       if (NativeRender)
         NativeRender(jniEnv, NULL);
 
-      // Mientras el motor este en logo (0) / titulo (1) -- pantallas que
-      // eran UI de Java y aca se ven blancas -- tapar con el logo/titulo
-      // reales del APK. A partir del estado 2 (menu) el motor dibuja de verdad.
+      /**
+       * @note Overlays the real logo/title splash while g_ui_status is 0/1.
+       *       Ver docs/loader/main.md para el razonamiento de diseño.
+       */
       if (g_ui_status == 0) {
         splash_draw(logo_tex);
       } else if (g_ui_status == 1) {

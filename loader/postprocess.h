@@ -11,25 +11,26 @@
 // Compilar y linkear el programa de shaders. Llamar una vez despues de gl_init().
 void postprocess_init(void);
 
-// Informar el tamaño real (POT) de la textura del compositor, para el uniform
-// de texel size. Llamar desde glTexImage2D_wrapper cuando se detecte la
-// textura del compositor (RGB565, la unica que este motor sube via
-// glTexImage2D/glTexSubImage2D).
+/**
+ * @brief Registers the compositor texture's real POT dimensions for the shader's texel-size uniform.
+ * @param tex_w POT texture width.
+ * @param tex_h POT texture height.
+ * @note Ver docs/loader/postprocess.md para el razonamiento de diseño.
+ */
 void postprocess_set_source_size(int tex_w, int tex_h);
 
-// Marcar que el proximo glDrawArrays es el blit del compositor. Llamar desde
-// glTexSubImage2D_wrapper cuando w==400 && h==240 (firma unica del compositor,
-// confirmada en log -- ver port_progress.md Backlog B.1).
+/**
+ * @brief Flags the next glDrawArrays call as the compositor's full-frame blit.
+ * @note Ver docs/loader/postprocess.md para el razonamiento de diseño.
+ */
 void postprocess_mark_next_draw(void);
 
-// Si el draw fue marcado (postprocess_mark_next_draw) y el shader esta
-// disponible, dibuja ELLA MISMA el quad de pantalla completa con su propia
-// geometria/atributos (no reusa los vertex/texcoord arrays legacy del motor,
-// ver postprocess.c) y devuelve 1 -- en ese caso, glDrawArrays_wrapper debe
-// SALTEARSE su propio glDrawArrays para esta llamada (mismo resultado visual
-// + el shader). Devuelve 0 (no hace nada) si el shader esta OFF en este
-// build o no aplica a este draw -- glDrawArrays_wrapper debe llamar al
-// glDrawArrays real como siempre en ese caso.
+/**
+ * @brief Draws the post-process quad itself if the last draw was flagged and the shader is available.
+ * @return Non-zero if it drew the quad (caller must skip its own glDrawArrays for this call);
+ *         0 if the shader is off or this draw wasn't flagged (caller must draw as usual).
+ * @note Ver docs/loader/postprocess.md para el razonamiento de diseño.
+ */
 int postprocess_try_draw(void);
 
 #endif

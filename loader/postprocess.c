@@ -6,32 +6,22 @@ extern void game_log(const char *fmt, ...);
 
 #include <vitaGL.h>
 
-// Sharpen (unsharp mask, 4 vecinos) sobre el blit del compositor 400x240 ->
-// pantalla completa. NO se toca el motor ni sus asset/buffers -- solo se
-// reemplaza, para ese unico draw call por frame, el fixed-function texturing
-// (GL_REPLACE) por este programa. Ver port_progress.md Backlog B.1 para el
-// analisis de por que reemplazar assets no serviria (el motor compone todo a
-// software en un buffer fijo 400x240) y por que un shader de post-proceso en
-// el blit final es la unica via.
-//
-// v2 (2026-07-11): la v1 reusaba los vertex/texcoord arrays legacy que arma
-// el motor (glVertexPointer/glTexCoordPointer) confiando en que vitaGL los
-// "bridgea" automaticamente a los atributos POSITION/TEXCOORD0 de un shader
-// custom. Resultado en consola: pantalla negra desde el menu en adelante. La
-// hipotesis mas probable: el mapeo semantics->ATTR de Cg sigue la convencion
-// estandar ARB_vertex_program (POSITION=ATTR0, pero TEXCOORD0=ATTR8, NO
-// ATTR1), que no necesariamente coincide con el indice al que vitaGL bridgea
-// el GL_TEXTURE_COORD_ARRAY legacy -- si no coincide, el shader lee texcoord
-// basura/cero y muestrea siempre el mismo texel (podria leerse como "negro"
-// si ese texel puntual es oscuro), aun con la textura y la geometria bien.
-//
-// v2 evita todo ese mapeo implicito: en vez de reusar los arrays del motor,
-// dibuja SU PROPIO quad de pantalla completa con glVertexAttribPointer +
-// glBindAttribLocation (API estandar, sin ambiguedad) usando geometria/UVs
-// que YA CONOCEMOS son constantes (el compositor es siempre pantalla
-// completa, con el sub-rect 400x240 fijo dentro de la textura POT -- ver
-// pp_src_w/h). Esto reemplaza por completo, en vez de envolver, el
-// glDrawArrays original del motor para ese unico draw call.
+/**
+ * @brief Fuente Cg del shader de sharpen (unsharp mask, 4 vecinos).
+ *
+ * Reemplaza, para el único draw call por frame del blit del compositor
+ * (400x240 -> pantalla completa), el texturing fixed-function (GL_REPLACE)
+ * por este programa. No modifica assets ni buffers del motor.
+ *
+ * Dibuja su propio quad de pantalla completa vía glVertexAttribPointer +
+ * glBindAttribLocation (en vez de reusar los vertex/texcoord arrays legacy
+ * del motor), con geometría/UVs constantes conocidas de antemano (ver
+ * pp_src_w/h).
+ *
+ * @note Ver docs/loader/postprocess.md para el razonamiento de diseño
+ * completo: por qué un shader de post-proceso es la única vía viable, y el
+ * historial de la v1 (pantalla negra) que motivó el diseño actual.
+ */
 static const char *VERT_SRC =
     "void main(\n"
     "    float2 position : POSITION,\n"
@@ -81,11 +71,13 @@ static const GLfloat QUAD_POS[] = {
     -1.0f,  1.0f,
      1.0f,  1.0f
 };
-// UV correspondiente, recalculado cuando se conoce el tamaño real de la
-// textura POT (postprocess_set_source_size). Orden confirmado contra el log
-// de arranque (vertices/UVs del propio draw del motor): la fila 0 de la
-// textura (V=0) corresponde a la parte de ARRIBA de la pantalla, V=240/alto
-// a la de ABAJO.
+/**
+ * @brief UV del quad de pantalla completa, recalculado cuando se conoce el
+ * tamaño real (POT) de la textura del compositor.
+ * @note Fila 0 de la textura (V=0) = parte de ARRIBA de la pantalla, V al
+ * fondo = parte de ABAJO. Ver docs/loader/postprocess.md para el
+ * razonamiento de diseño.
+ */
 static GLfloat quad_uv[8];
 
 static void update_uv(void) {
@@ -129,10 +121,11 @@ void postprocess_init(void) {
     GLuint prog = glCreateProgram();
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
-    // Bindear nosotros los indices de atributo ANTES de linkear, en vez de
-    // confiar en el mapeo automatico semantics->ATTR de Cg (ver nota v2
-    // arriba) -- alimentamos estos dos atributos nosotros mismos via
-    // glVertexAttribPointer, así que elegimos los indices.
+    /**
+     * @note Los índices de atributo se bindean explícitamente antes de
+     * linkear, en vez de depender del mapeo automático semantics->ATTR de
+     * Cg. Ver docs/loader/postprocess.md para el razonamiento de diseño.
+     */
     glBindAttribLocation(prog, ATTRIB_POSITION, "position");
     glBindAttribLocation(prog, ATTRIB_TEXCOORD, "texcoord");
     glLinkProgram(prog);
