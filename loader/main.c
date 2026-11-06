@@ -8,6 +8,8 @@
 #include <psp2/ctrl.h>
 #include <psp2/display.h>
 #include <psp2/io/dirent.h>
+#include <psp2/io/stat.h>
+#include <psp2/kernel/cpu.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
@@ -19,6 +21,7 @@
 #include <time.h>
 
 #include "audio.h"
+#include "controls.h"
 #include "debugScreen.h"
 #include "image_load.h"
 #include "postprocess.h"
@@ -34,6 +37,7 @@
  */
 extern int kuKernelCpuUnrestrictedMemcpy(void *dst, const void *src,
                                          SceSize len);
+extern void kuKernelFlushCaches(const void *ptr, SceSize len);
 
 #define printf psvDebugScreenPrintf
 #define LOG_DIR "ux0:data/zenonia-2/logs"
@@ -51,15 +55,28 @@ unsigned int sceLibcHeapSize =
     4 * 1024 * 1024; // 4 MB for SCE Libc (system libs)
 
 /**
- * @brief Opens a new timestamped log file under LOG_DIR for this run.
- * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ * @brief Opens LOG_DIR/NNN.log for this run: highest existing number + 1
+ *        (001-999; after 999 it wraps to 001 and overwrites).
  */
 void init_log() {
   sceIoMkdir(LOG_DIR, 0777); // fails silently if it already exists
 
+  int last = 0;
+  SceUID dir = sceIoDopen(LOG_DIR);
+  if (dir >= 0) {
+    SceIoDirent ent;
+    while (sceIoDread(dir, &ent) > 0) {
+      int n;
+      char ext[8];
+      if (sscanf(ent.d_name, "%3d.%7s", &n, ext) == 2 &&
+          strcmp(ext, "log") == 0 && n > last && n <= 999)
+        last = n;
+    }
+    sceIoDclose(dir);
+  }
+
   char log_path[256];
-  time_t t = time(NULL);
-  snprintf(log_path, sizeof(log_path), LOG_DIR "/log_%u.txt", (unsigned int)t);
+  snprintf(log_path, sizeof(log_path), LOG_DIR "/%03d.log", last % 999 + 1);
 
   log_file = fopen(log_path, "w");
   if (log_file) {
@@ -146,11 +163,10 @@ void (*SetDpadPosition)(void *env, void *obj, int x, int y, int size) = NULL;
 void (*SetButtonPosition)(void *env, void *obj, int x, int y, int size) = NULL;
 
 void update_virtual_buttons(int status) {
-#ifndef HIDE_VIRTUAL_BUTTONS
   if (!SetShowDirectionButton) return;
   void *env = &jni;
 
-  if (status >= 3) {
+  if (status >= 3 && g_vbuttons_visible) {
     // In-game: gameplay (3) y subpantallas de juego (6, 8, etc.)
     if (SetDpadDrawingBlock) SetDpadDrawingBlock(env, NULL, 0);
     if (SetDpadPosition) SetDpadPosition(env, NULL, 4, 123, 1);
@@ -173,7 +189,6 @@ void update_virtual_buttons(int status) {
     if (SetShowSkipButton) SetShowSkipButton(env, NULL, 0);
     if (SetShowResetButton) SetShowResetButton(env, NULL, 0);
   }
-#endif
 }
 
 /**
@@ -225,22 +240,31 @@ static void queue_input_event(void *env, int type, int p1, int p2) {
   }
 }
 
+
+extern volatile int g_ui_status;
+static int vbtn_patch_ok = 0;
+static uintptr_t vbtn_text_base = 0;
+
 /**
- * @brief Maps physical Vita buttons to the HAL keycodes Android's on-screen
- *        touch UI would otherwise generate.
- * @note Ver docs/loader/main.md para el razonamiento de diseño.
+ * @brief Shows/hides the engine's touch D-pad and buttons (L+R or the
+ *        controls menu): patches their draw functions and the engine's
+ *        show flags, and enables/disables the loader's touch hit zones.
  */
-static const struct {
-  unsigned int btn;
-  int hal;
-} btn_map[] = {
-    {SCE_CTRL_UP, HAL_KEY_UP},         {SCE_CTRL_DOWN, HAL_KEY_DOWN},
-    {SCE_CTRL_LEFT, HAL_KEY_LEFT},     {SCE_CTRL_RIGHT, HAL_KEY_RIGHT},
-    {SCE_CTRL_CROSS, HAL_KEY_OK},      {SCE_CTRL_CIRCLE, HAL_KEY_BACK},
-    {SCE_CTRL_TRIANGLE, HAL_KEY_SKIP}, {SCE_CTRL_SQUARE, HAL_KEY_MAP},
-    {SCE_CTRL_LTRIGGER, HAL_KEY_SAVE},
-};
-#define BTN_MAP_COUNT (sizeof(btn_map) / sizeof(btn_map[0]))
+void set_virtual_buttons_visible(int visible) {
+  if (!vbtn_patch_ok) visible = 1; // unknown .so: never patched, always drawn
+  const uint16_t insn = visible ? 0xb5f0 : 0x4770; // push {r4-r7,lr} : bx lr
+  if (vbtn_patch_ok) {
+    void *dpad = (void *)(vbtn_text_base + 0x52980);
+    void *btn = (void *)(vbtn_text_base + 0x52a50);
+    kuKernelCpuUnrestrictedMemcpy(dpad, &insn, sizeof(insn));
+    kuKernelCpuUnrestrictedMemcpy(btn, &insn, sizeof(insn));
+    kuKernelFlushCaches(dpad, sizeof(insn));
+    kuKernelFlushCaches(btn, sizeof(insn));
+  }
+  g_vbuttons_visible = visible;
+  update_virtual_buttons(g_ui_status);
+  game_log("[VBUTTONS] %s\n", visible ? "visibles" : "ocultos");
+}
 
 /**
  * @brief Applies confirmed binary patches to the loaded .so in place.
@@ -265,37 +289,22 @@ static void apply_so_patches(so_module *mod) {
   game_log("Parche aplicado: CMvLayerData::PreLoad ble->beq @ 0x%08x\n",
            (unsigned int)(mod->text_base + 0xaec38));
 
-#ifdef HIDE_VIRTUAL_BUTTONS
   /**
-   * @brief Patches drawDpad (0x52980) and drawButton (0x52a50) to `bx lr`
-   *        so the mobile touch overlay is never drawn.
-   * @note Ver docs/loader/main.md para el razonamiento de diseño.
+   * @brief drawDpad (0x52980) / drawButton (0x52a50) are toggled between their
+   *        original first instruction and `bx lr` at runtime (L+R, see
+   *        set_virtual_buttons_visible), so the touch overlay can be hidden.
    */
-  const uint16_t bx_lr = 0x4770;
-  const uint16_t dpad_expected = 0xb5f0; // push {r4, r5, r6, r7, lr}
-  uint16_t dpad_cur = *(uint16_t *)(mod->text_base + 0x52980);
-  if (dpad_cur == dpad_expected) {
-    kuKernelCpuUnrestrictedMemcpy((void *)(mod->text_base + 0x52980), &bx_lr,
-                                  sizeof(bx_lr));
-    game_log("Parche aplicado: drawDpad -> bx lr @ 0x%08x (botones virtuales ocultos)\n",
-             (unsigned int)(mod->text_base + 0x52980));
-  } else {
-    game_log("[PATCH] AVISO: bytes inesperados en drawDpad 0x52980 (0x%04x) -- omitido\n",
-             dpad_cur);
-  }
-
-  uint16_t btn_cur = *(uint16_t *)(mod->text_base + 0x52a50);
-  if (btn_cur == dpad_expected) {
-    kuKernelCpuUnrestrictedMemcpy((void *)(mod->text_base + 0x52a50), &bx_lr,
-                                  sizeof(bx_lr));
-    game_log("Parche aplicado: drawButton -> bx lr @ 0x%08x (botones virtuales ocultos)\n",
-             (unsigned int)(mod->text_base + 0x52a50));
-  } else {
-    game_log("[PATCH] AVISO: bytes inesperados en drawButton 0x52a50 (0x%04x) -- omitido\n",
-             btn_cur);
-  }
+  const uint16_t push_r4_r7_lr = 0xb5f0;
+  vbtn_patch_ok = *(uint16_t *)(mod->text_base + 0x52980) == push_r4_r7_lr &&
+                  *(uint16_t *)(mod->text_base + 0x52a50) == push_r4_r7_lr;
+  vbtn_text_base = mod->text_base;
+  if (!vbtn_patch_ok)
+    game_log("[PATCH] AVISO: bytes inesperados en drawDpad/drawButton -- "
+             "botones virtuales siempre visibles\n");
+#ifdef HIDE_VIRTUAL_BUTTONS
+  set_virtual_buttons_visible(0);
 #else
-  game_log("[PATCH] Botones virtuales habilitados (HUD táctil visible)\n");
+  set_virtual_buttons_visible(1);
 #endif
 }
 
@@ -446,6 +455,37 @@ void log_active_frame_buf(const char *label) {
 }
 
 /**
+ * @brief Frame-rate mode: 30 FPS = eglSwapInterval(2) (confirmed stable,
+ *        Fase 20.2); ORIGINAL = the engine's SetSpeed value, paced like the
+ *        Android NexusGLThread (period 1000/fps ms) on top of interval 1.
+ * @note The deadline pacer is only used here: at <=22 FPS the period has
+ *       >=10 ms slack for the vblank wait, unlike at 30 (see Fase 20.2).
+ */
+extern volatile int g_engine_fps;
+void set_fps_mode(int original) {
+  g_fps_original = original;
+  eglSwapInterval(eglGetDisplay(EGL_DEFAULT_DISPLAY), original ? 1 : 2);
+  game_log("[FPS] modo %s (motor pide %d)\n", original ? "ORIGINAL" : "30",
+           g_engine_fps);
+}
+
+static void original_pace(void) {
+  static SceUInt64 deadline = 0;
+  int fps = g_engine_fps;
+  if (!g_fps_original || fps <= 0) {
+    deadline = 0;
+    return;
+  }
+  SceUInt64 period = (SceUInt64)(1000 / fps) * 1000; // ms granularity, as Java
+  SceUInt64 now = sceKernelGetProcessTimeWide();
+  if (deadline == 0 || now > deadline + period)
+    deadline = now; // first frame / long stall: resync, don't burst
+  else if (deadline > now)
+    sceKernelDelayThread(deadline - now);
+  deadline += period;
+}
+
+/**
  * @brief Initializes vitaGL (no MSAA, no triple buffering) and caps the
  *        swap rate to ~30 FPS via real VSync.
  * @note Ver docs/loader/main.md para el razonamiento de diseño.
@@ -456,8 +496,10 @@ void gl_init() {
    *        failure code — see docs/loader/main.md. */
   vglInitExtended(0, 960, 544, 6 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
 
-  /** @note interval=2 caps to ~30 FPS (2 vblanks/swap @ ~59.94Hz) — ver
-   *        docs/loader/main.md para el razonamiento de diseño. */
+  /** @note interval=2 caps to ~30 FPS (2 vblanks/swap). A software deadline
+   *        pacer on top of interval=1 was tried (Fase 20) and dropped to 20 FPS:
+   *        sleeping to its deadline then blocking on the next vblank made most
+   *        frames 3 vblanks long. */
   eglSwapInterval(eglGetDisplay(EGL_DEFAULT_DISPLAY), 2);
 
   gl_active = 1;
@@ -474,6 +516,9 @@ int main() {
   scePowerSetBusClockFrequency(222);
   scePowerSetGpuClockFrequency(166);
   scePowerSetGpuXbarClockFrequency(166);
+  // Render/engine on core 0, audio mixer on core 1 (see audio_init)
+  sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(),
+                                       SCE_KERNEL_CPU_MASK_USER_0);
   init_log();
   game_log("Iniciando Zenonia 2 port (SoLoader)\n");
   // Cargar la libreria SO en memoria
@@ -565,7 +610,6 @@ int main() {
     game_log("Llamando NativeInit...\n");
     if (NativeInit)
       NativeInit(jniEnv, NULL);
-#ifndef HIDE_VIRTUAL_BUTTONS
     if (SetDpadDrawingBlock)
       SetDpadDrawingBlock(jniEnv, NULL, 0);
     if (SetDpadPosition)
@@ -575,7 +619,6 @@ int main() {
     game_log("Botones virtuales inicializados: DpadPos=%p BtnPos=%p ShowDpad=%p\n",
              (void *)SetDpadPosition, (void *)SetButtonPosition,
              (void *)SetShowDirectionButton);
-#endif
     game_log("Llamando NativeResize...\n");
     if (NativeResize)
       NativeResize(jniEnv, NULL, 960, 544);
@@ -588,15 +631,19 @@ int main() {
     // Habilitar muestreo táctil
     sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT,
                              SCE_TOUCH_SAMPLING_STATE_START);
+    sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+    sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
+    controls_init();
 
     SceCtrlData pad;
     SceTouchData touch;
     int last_touch = 0;
     int last_tx = 0, last_ty = 0;
     int active_touch_key = 0;
-    unsigned int old_buttons = 0;
+    unsigned int old_buttons = 0, old_game_buttons = 0, suppress = 0;
     int frame = 0;
     int last_ui_status = -1;
+    SceUInt64 stat_t0 = 0, render_us = 0, render_max_us = 0; // FPS telemetry
 
     while (1) {
       if (g_ui_status != last_ui_status) {
@@ -607,27 +654,48 @@ int main() {
       sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1);
 
       if ((frame++ % 120) == 0) {
-        game_log("frame %d alive, touch.reportNum=%d pad.buttons=0x%08x "
+        SceUInt64 now = sceKernelGetProcessTimeWide();
+        float fps = stat_t0 ? 120.0f * 1000000.0f / (float)(now - stat_t0) : 0;
+        game_log("frame %d alive, fps=%.1f render_avg=%.1fms render_max=%.1fms "
                  "ui_status=%d\n",
-                 frame, touch.reportNum, (unsigned int)pad.buttons,
+                 frame, fps, render_us / 120 / 1000.0f, render_max_us / 1000.0f,
                  g_ui_status);
+        stat_t0 = now;
+        render_us = render_max_us = 0;
       }
 
-      // Salida de emergencia: START+SELECT juntos (START solo ya no,
-      // para poder usarlo como tecla del juego mas adelante)
-      if ((pad.buttons & SCE_CTRL_START) && (pad.buttons & SCE_CTRL_SELECT))
-        break;
-
-      // --- Botones fisicos -> teclas HAL (press/release por flanco) ---
-      unsigned int pressed = pad.buttons & ~old_buttons;
-      unsigned int released = old_buttons & ~pad.buttons;
-      for (int i = 0; i < BTN_MAP_COUNT; i++) {
-        if (pressed & btn_map[i].btn)
-          queue_input_event(jniEnv, MH_KEY_PRESSEVENT, btn_map[i].hal, 0);
-        if (released & btn_map[i].btn)
-          queue_input_event(jniEnv, MH_KEY_RELEASEEVENT, btn_map[i].hal, 0);
+      // --- Botones fisicos -> acciones remapeables (controls.c) ---
+      unsigned int buttons = controls_read(&pad);
+      unsigned int pressed = buttons & ~old_buttons;
+#define COMBO_HELD(m) ((buttons & (m)) == (m) && (old_buttons & (m)) != (m))
+      // Buttons held through a combo or the menu closing stay out of the game
+      // until released (else closing with O would also press BACK, etc.).
+      // An L tap just before R may still fire its action, as in Zenonia 3.
+      if (COMBO_HELD(SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER)) {
+        set_virtual_buttons_visible(!g_vbuttons_visible);
+        suppress |= SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER;
       }
-      old_buttons = pad.buttons;
+      if (COMBO_HELD(SCE_CTRL_SELECT | SCE_CTRL_RTRIGGER)) {
+        set_fps_mode(!g_fps_original);
+        controls_save();
+        suppress |= SCE_CTRL_SELECT | SCE_CTRL_RTRIGGER;
+      }
+      if (COMBO_HELD(SCE_CTRL_START | SCE_CTRL_SELECT) && !controls_menu_active())
+        controls_menu_open();
+      if (controls_menu_active() && controls_menu_update(buttons, pressed))
+        suppress |= buttons; // menu just closed
+      suppress &= buttons;
+      unsigned int game_buttons =
+          controls_menu_active() ? 0 : (buttons & ~suppress);
+      for (int a = 0; a < ACT_COUNT; a++) {
+        int was = (old_game_buttons & controls_binding(a)) != 0;
+        int is = (game_buttons & controls_binding(a)) != 0;
+        if (is != was)
+          queue_input_event(jniEnv, is ? MH_KEY_PRESSEVENT : MH_KEY_RELEASEEVENT,
+                            controls_action_hal(a), 0);
+      }
+      old_buttons = buttons;
+      old_game_buttons = game_buttons;
 
       // --- Touch: panel 1920x1088 -> espacio del juego 400x240 ---
       if (touch.reportNum > 0) {
@@ -636,9 +704,10 @@ int main() {
         last_tx = x;
         last_ty = y;
 
-        if (!last_touch) {
-#ifndef HIDE_VIRTUAL_BUTTONS
-          if (g_ui_status >= 3) {
+        if (controls_menu_active()) {
+          // menu open: front touch ignored
+        } else if (!last_touch) {
+          if (g_ui_status >= 3 && g_vbuttons_visible) {
             // Mapeo táctil a botones virtuales durante in-game
             if (x <= 55 && y <= 50) {
               // Pergamino / Mapa (esquina superior izquierda)
@@ -674,39 +743,38 @@ int main() {
             active_touch_key = 0;
             queue_input_event(jniEnv, MH_POINTER_PRESSEVENT, x, y);
           }
-#else
-          queue_input_event(jniEnv, MH_POINTER_PRESSEVENT, x, y);
-#endif
           last_touch = 1;
         }
       } else if (last_touch) {
-#ifndef HIDE_VIRTUAL_BUTTONS
         if (active_touch_key != 0) {
           queue_input_event(jniEnv, MH_KEY_RELEASEEVENT, active_touch_key, 0);
           active_touch_key = 0;
         } else {
           queue_input_event(jniEnv, MH_POINTER_RELEASEEVENT, last_tx, last_ty);
         }
-#else
-        queue_input_event(jniEnv, MH_POINTER_RELEASEEVENT, last_tx, last_ty);
-#endif
         last_touch = 0;
       }
 
       glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
 
-      // Igual que NexusGLRenderer.drawFrame: entregar el evento clet
-      // pendiente (uno por frame) justo antes de NativeRender
-      if (handleCletEvent && eq_head != eq_tail) {
+      // Como NexusGLRenderer.drawFrame, antes de NativeRender. Se entregan
+      // TODOS los pendientes: de a uno por frame la cola se atrasaba (varios
+      // botones a la vez en combate) y el input llegaba frames tarde.
+      while (handleCletEvent && eq_head != eq_tail) {
         input_event *ev = &event_queue[eq_head];
         eq_head = (eq_head + 1) % 16;
         handleCletEvent(jniEnv, NULL, ev->type, ev->p1, ev->p2);
       }
 
       // Renderizar el frame
-      if (NativeRender)
+      SceUInt64 r0 = sceKernelGetProcessTimeWide();
+      if (NativeRender && !controls_menu_active()) // menu pauses the game
         NativeRender(jniEnv, NULL);
+      SceUInt64 rdt = sceKernelGetProcessTimeWide() - r0;
+      render_us += rdt;
+      if (rdt > render_max_us)
+        render_max_us = rdt;
 
       /**
        * @note Overlays the real logo/title splash while g_ui_status is 0/1.
@@ -718,7 +786,10 @@ int main() {
         splash_draw(title_tex);
         touch_draw(frame);
       }
+      if (controls_menu_active())
+        splash_draw(controls_menu_texture());
 
+      original_pace();
       // Intercambiar buffers en vitaGL
       vglSwapBuffers(GL_FALSE);
     }

@@ -20,6 +20,7 @@
  */
 
 #include <psp2/audioout.h>
+#include <psp2/kernel/cpu.h>
 #include <psp2/kernel/threadmgr.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -264,7 +265,8 @@ void audio_init(void) {
     audio_mutex = sceKernelCreateMutex("zen2_audio_mutex", 0, 0, NULL);
     audio_running = 1;
     audio_thread_id = sceKernelCreateThread("zen2_audio", audio_thread,
-                                            0x10000100, 0x10000, 0, 0, NULL);
+                                            0x10000100, 0x10000, 0,
+                                            SCE_KERNEL_CPU_MASK_USER_1, NULL);
     if (audio_thread_id >= 0) {
         sceKernelStartThread(audio_thread_id, 0, NULL);
         game_log("[AUDIO] mezclador iniciado (port=%d, %d Hz)\n", audio_port, AUDIO_RATE);

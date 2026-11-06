@@ -62,4 +62,16 @@ tools/
 porting_tools/
 psvita-port-toolkit/
 extracted_toolkit/
-scripts
+scripts/*
+# vendored vitaGL/vitaShaRK build outputs
+lib/vitagl/**/*.o
+lib/vitagl/libvitaGL.a
+lib/vitashark/**/*.o
+lib/vitashark/libvitashark.a
+!lib/vitagl/Makefile
+!lib/vitashark/Makefile
+!scripts/build_vitagl.sh
+
+# local-only: duplicate vitaGL clone (build uses lib/vitagl), clangd db
+/vitaGL/
+compile_commands.json

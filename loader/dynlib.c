@@ -10,6 +10,7 @@
 #include <stdarg.h>
 
 #include <arm_neon.h>
+#include <psp2/kernel/clib.h>
 #include <vitaGL.h>
 #include "so_util.h"
 #include "postprocess.h"
@@ -105,6 +106,43 @@ void *convert_rgb565_to_rgba8888(const void *pixels, int width, int height) {
     return dst;
 }
 
+#ifdef SHARP_SCALING
+/**
+ * @brief Nearest-neighbour 2x upscale of an RGB565 image ("sharp bilinear").
+ * @details The engine's 400x240 frame is stretched 2.4x/2.27x to 960x544 with
+ *          GL_LINEAR, which smears every pixel. Storing the texture at 2x
+ *          (same normalized UVs, so the engine's quad is untouched) leaves
+ *          only a ~1.2x bilinear step: pixels stay crisp, edges stay smooth.
+ * @note ponytail: costs ~3 ms/frame (vitaGL copy-on-writes the whole 1024x1024
+ *       texture each upload); if CPU-bound, ping-pong two textures instead.
+ */
+static uint16_t *dbl_buf = NULL;
+static size_t dbl_buf_cap = 0;
+static const void *upscale2x_rgb565(const void *pixels, int w, int h) {
+    if (!pixels) return NULL;
+    size_t needed = (size_t)w * h * 4 * sizeof(uint16_t);
+    if (needed > dbl_buf_cap) {
+        dbl_buf = (uint16_t *)realloc(dbl_buf, needed);
+        dbl_buf_cap = needed;
+    }
+    int src_stride = ((w * 2 + 3) & ~3) / 2; // GL_UNPACK_ALIGNMENT default 4
+    for (int y = 0; y < h; y++) {
+        const uint16_t *src = (const uint16_t *)pixels + (size_t)y * src_stride;
+        uint16_t *dst = dbl_buf + (size_t)y * 2 * (w * 2);
+        int x = 0;
+        for (; x + 8 <= w; x += 8) {
+            uint16x8_t p = vld1q_u16(src + x);
+            uint16x8x2_t z = vzipq_u16(p, p);
+            vst1q_u16(dst + x * 2, z.val[0]);
+            vst1q_u16(dst + x * 2 + 8, z.val[1]);
+        }
+        for (; x < w; x++) dst[x * 2] = dst[x * 2 + 1] = src[x];
+        sceClibMemcpy(dst + w * 2, dst, w * 2 * sizeof(uint16_t));
+    }
+    return dbl_buf;
+}
+#endif
+
 void glTexImage2D_wrapper(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void *pixels) {
     static int img_log = 0;
     if (img_log < 10) {
@@ -123,6 +161,11 @@ void glTexImage2D_wrapper(GLenum target, GLint level, GLint internalformat, GLsi
          * @brief Registers the POT texture dimensions with the post-process module.
          * @note Ver docs/loader/dynlib.md para el razonamiento (unica textura RGB565 del motor).
          */
+#ifdef SHARP_SCALING
+        pixels = upscale2x_rgb565(pixels, width, height);
+        width *= 2;
+        height *= 2;
+#endif
         postprocess_set_source_size(width, height);
 #ifdef NATIVE_RGB565_TEST
         /**
@@ -169,6 +212,13 @@ void glTexSubImage2D_wrapper(GLenum target, GLint level, GLint xoffset, GLint yo
          * @note Ver docs/loader/dynlib.md para el razonamiento (firma unica del blit del compositor).
          */
         if (width == 400 && height == 240) postprocess_mark_next_draw();
+#ifdef SHARP_SCALING
+        pixels = upscale2x_rgb565(pixels, width, height);
+        xoffset *= 2;
+        yoffset *= 2;
+        width *= 2;
+        height *= 2;
+#endif
 #ifdef NATIVE_RGB565_TEST
         static int native_sub_log = 0;
         if (native_sub_log < 5) {
@@ -449,12 +499,13 @@ void glViewport_wrapper(GLint x, GLint y, GLsizei width, GLsizei height) {
 }
 
 // C++ / GCC stubs
-void __cxa_begin_cleanup() {}
-void __cxa_call_unexpected() {}
-int __cxa_guard_acquire(int* g) { return !*(char*)(g); }
-void __cxa_guard_release(int* g) { *(char*)g = 1; }
-void __cxa_type_match() {}
-void __gnu_Unwind_Find_exidx() {}
+// C++ ABI stubs: static + renamed since libstdc++ (needed by vitaGL) defines the real ones
+static void cxa_begin_cleanup_stub(void) {}
+static void cxa_call_unexpected_stub(void) {}
+static int cxa_guard_acquire_stub(int* g) { return !*(char*)(g); }
+static void cxa_guard_release_stub(int* g) { *(char*)g = 1; }
+static void cxa_type_match_stub() {}
+static void gnu_Unwind_Find_exidx_stub() {}
 void __stack_chk_fail() {}
 int __stack_chk_guard = 0;
 
@@ -567,12 +618,12 @@ so_default_dynlib default_dynlib[] = {
     { "__android_log_print", (uintptr_t)&__android_log_print },
 
     // C++ ABI / GCC
-    { "__cxa_begin_cleanup", (uintptr_t)&__cxa_begin_cleanup },
-    { "__cxa_call_unexpected", (uintptr_t)&__cxa_call_unexpected },
-    { "__cxa_guard_acquire", (uintptr_t)&__cxa_guard_acquire },
-    { "__cxa_guard_release", (uintptr_t)&__cxa_guard_release },
-    { "__cxa_type_match", (uintptr_t)&__cxa_type_match },
-    { "__gnu_Unwind_Find_exidx", (uintptr_t)&__gnu_Unwind_Find_exidx },
+    { "__cxa_begin_cleanup", (uintptr_t)&cxa_begin_cleanup_stub },
+    { "__cxa_call_unexpected", (uintptr_t)&cxa_call_unexpected_stub },
+    { "__cxa_guard_acquire", (uintptr_t)&cxa_guard_acquire_stub },
+    { "__cxa_guard_release", (uintptr_t)&cxa_guard_release_stub },
+    { "__cxa_type_match", (uintptr_t)&cxa_type_match_stub },
+    { "__gnu_Unwind_Find_exidx", (uintptr_t)&gnu_Unwind_Find_exidx_stub },
     { "__stack_chk_fail", (uintptr_t)&__stack_chk_fail },
     { "__stack_chk_guard", (uintptr_t)&__stack_chk_guard },
 
@@ -581,9 +632,9 @@ so_default_dynlib default_dynlib[] = {
     { "free", (uintptr_t)&free_wrapper },
     { "calloc", (uintptr_t)&calloc_wrapper },
     { "realloc", (uintptr_t)&realloc_wrapper },
-    { "memcpy", (uintptr_t)&memcpy },
-    { "memset", (uintptr_t)&memset },
-    { "memmove", (uintptr_t)&memmove },
+    { "memcpy", (uintptr_t)&sceClibMemcpy },
+    { "memset", (uintptr_t)&sceClibMemset },
+    { "memmove", (uintptr_t)&sceClibMemmove },
     
     // Libc - File I/O
     { "fopen", (uintptr_t)&fopen_hook },

@@ -57,7 +57,7 @@ onward (see `port_progress.md` Fase 14.1) — do not assume it works without che
 - Game data assets (from the extracted APK) live under `ux0_data/zenonia-2/` in this repo and must be
   copied to `ux0:data/zenonia-2/` on the target (real Vita or Vita3K's virtual `ux0`) separately from
   installing the VPK — see `INSTALL.md` for exact paths for both targets.
-- On-console logs are written per-run to `ux0:data/zenonia-2/logs/log_<timestamp>.txt` (see `init_log()`
+- On-console logs are written per-run to `ux0:data/zenonia-2/logs/NNN.log` (001-999, incremental) (see `init_log()`
   in `loader/main.c`); crash dumps are `psp2core*.psp2dmp` files in `ux0:data`. Local copies of past
   sessions live in `logs/`.
 - `clean_macos.sh` deletes macOS `._*` AppleDouble sidecar files, which VitaShell/vita_create_vpk

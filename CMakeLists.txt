@@ -75,6 +75,10 @@ option(SAFE_DISTRIBUTION "Build VPK without copyrighted assets for safe distribu
 ## vitaGL con GL_RGB/GL_UNSIGNED_SHORT_5_6_5, sin la conversion a RGBA8888 en
 ## CPU que loader/dynlib.c hace hoy (convert_rgb565_to_rgba8888, ver
 ## port_progress.md Fase 16.1).
+option(ENABLE_SHARP_SCALING "Store the engine's 400x240 frame at 2x (nearest) so the final stretch to 960x544 is near-crisp instead of blurry bilinear" ON)
+if (ENABLE_SHARP_SCALING)
+  add_definitions(-DSHARP_SCALING)
+endif()
 option(ENABLE_NATIVE_RGB565_TEST "Experiment: upload RGB565 straight to vitaGL without the CPU conversion, to test whether GL_INVALID_ENUM still happens (see port_progress.md Fase 18)" ON)
 if (ENABLE_NATIVE_RGB565_TEST)
   add_definitions(-DNATIVE_RGB565_TEST)
@@ -104,6 +108,7 @@ set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d PARENTAL_LEVEL=1 -d ATTRIBUTE2=
 include_directories(
   ./common # This is for debugScreenPrintf(), you shouldn't need it in your projects
   ./lib    # for <falso_jni/FalsoJNI.h>
+  ./lib/vitagl/source # vendored vitaGL header, before the vitasdk sysroot one
 )
 
 # Add any additional library paths here
@@ -122,16 +127,42 @@ add_executable(${PROJECT_NAME}
   ./loader/audio.c
   ./loader/postprocess.c
   ./loader/image_load.c
+  ./loader/controls.c
   ./common/debugScreen.c
   ./lib/falso_jni/FalsoJNI.c
   ./lib/falso_jni/FalsoJNI_ImplBridge.c
   ./lib/falso_jni/FalsoJNI_Logger.c
 )
 
+## vitaGL + vitaShaRK vendored in lib/ (same setup as Zenonia3-vita, confirmed on
+## hardware). The SDK's prebuilt libvitaGL.a is not built with SOFTFP_ABI=1, which this
+## softfp loader needs -> black screen from the menu on (log_1793915751, no GL errors).
+## patches/vitagl-disable-system-app-mode.patch: second known black-screen cause.
+## TEXTURES_SPEEDHACK: skip vitaGL's per-upload copy of the whole texture (it was copying
+## the 1024x1024 compositor texture every frame); safe here since the GPU finishes the single
+## fullscreen quad long before the engine's next ~20 ms software frame is uploaded.
+set(VITAGL_MAKE_FLAGS_STR "SOFTFP_ABI=1 NO_SPLASHSCREEN=1 NO_DEBUG=1 TEXTURES_SPEEDHACK=1")
+separate_arguments(VITAGL_MAKE_FLAGS UNIX_COMMAND "${VITAGL_MAKE_FLAGS_STR}")
+set(VITAGL_STAMP "${CMAKE_BINARY_DIR}/vitagl.stamp")
+add_custom_target(vitaGL_lib
+  COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/build_vitagl.sh" "${VITAGL_MAKE_FLAGS_STR}" "${VITAGL_STAMP}" "${CMAKE_SOURCE_DIR}/lib/vitagl" "${CMAKE_SOURCE_DIR}/patches"
+  COMMAND make -C "${CMAKE_SOURCE_DIR}/lib/vitagl" ${VITAGL_MAKE_FLAGS}
+  BYPRODUCTS "${CMAKE_SOURCE_DIR}/lib/vitagl/libvitaGL.a"
+  COMMENT "Building vitaGL with ${VITAGL_MAKE_FLAGS_STR}..."
+)
+add_dependencies(${PROJECT_NAME} vitaGL_lib)
+add_custom_target(vitashark_lib
+  COMMAND make -C "${CMAKE_SOURCE_DIR}/lib/vitashark"
+  BYPRODUCTS "${CMAKE_SOURCE_DIR}/lib/vitashark/libvitashark.a"
+  COMMENT "Building vitaShaRK..."
+)
+add_dependencies(${PROJECT_NAME} vitashark_lib)
+
 # Library to link to (drop the -l prefix).
 target_link_libraries(${PROJECT_NAME}
-  vitaGL
-  vitashark
+  "${CMAKE_SOURCE_DIR}/lib/vitagl/libvitaGL.a"
+  stdc++ # vitaGL's shader preprocessor is C++
+  "${CMAKE_SOURCE_DIR}/lib/vitashark/libvitashark.a"
   mathneon
   m
   # Decodificador OGG Vorbis (Tremor, punto fijo) para loader/audio.c

@@ -12,5 +12,6 @@
   "vita_logs_dir": "/ux0:/data/zenonia-2/logs",
   "vita_cg_dir": "ux0:/data/zenonia-2/cg",
   "vita_glsl_dir": "ux0:/data/zenonia-2/glsl",
-  "vita_game_data_dir": "/ux0:/data/zenonia-2"
+  "vita_game_data_dir": "/ux0:/data/zenonia-2",
+  "platform": "android"
 }

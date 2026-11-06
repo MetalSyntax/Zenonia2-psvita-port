@@ -230,9 +230,14 @@ jint Zenonia_getGLOptionLinear(jmethodID id, va_list args) {
     return 1; // 1 for linear filtering
 }
 
+/** FPS requested by the engine (CMvOptionSaveData::Apply: speed option*4+10,
+ *  i.e. 10/14/18/22; 4 while saving, 15 on the logo). Honored in ORIGINAL mode. */
+volatile int g_engine_fps = 0;
+
 void Zenonia_SetSpeed(jmethodID id, va_list args) {
     int speed = va_arg(args, int);
     game_log("[Java] SetSpeed: %d\n", speed);
+    g_engine_fps = speed;
 }
 
 jobject Zenonia_getPhoneModel(jmethodID id, va_list args) {
@@ -261,10 +266,9 @@ void Zenonia_OnUIStatusChange(jmethodID id, va_list args) {
 }
 
 void Zenonia_OnShowSaveButton(jmethodID id, va_list args) {
-#ifndef HIDE_VIRTUAL_BUTTONS
-    if (SetShowSaveButton)
+    extern volatile int g_vbuttons_visible;
+    if (g_vbuttons_visible && SetShowSaveButton)
         SetShowSaveButton(&jni, NULL, 1);
-#endif
 }
 
 void Zenonia_VoidNoop(jmethodID id, va_list args) {

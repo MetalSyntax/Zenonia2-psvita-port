@@ -1011,6 +1011,96 @@ Ambas variantes (`./build.sh normal` y `./build.sh rgb565test`) compilan y linke
 `eglGetDisplay`/`eglSwapInterval` existen en `libvitaGL.a` de este toolchain vía `nm` antes de compilar).
 **Pendiente:** confirmar en consola que el framerate ahora se estabiliza en ~30 FPS sin tearing.
 
+## Fase 20: respuesta a review pública ("lag en combate, movimiento lento, borroso, glitches") — 2026-11-05
+
+**Hallazgos:**
+- El motor avanza 1 tick de lógica por `NativeRender` (su único reloj, `MC_knlCurrentTime`, tiene resolución
+  de 1 s) → velocidad del juego == FPS. Con `eglSwapInterval(2)` (Fase 19) cualquier frame de combate >33 ms
+  caía a 20 FPS = el juego se ralentiza un 33% justo en combate.
+- El motor pide su FPS de diseño vía JNI `SetSpeed` (logs: 21/22 en juego, 14/18 en algunas escenas) y el Java
+  original lo respetaba (`NexusGLThread.SetFPS` → `sleep(1000/fps - elapsed)`). Seguimos ignorándolo y usando
+  30 (decisión previa del usuario); queda documentado por si se quiere la velocidad original.
+- Input: la cola de eventos clet entregaba UNO por frame (el Java original guardaba solo el último) → con
+  varios botones a la vez se atrasaba frames. Además el stick analógico no estaba mapeado.
+- Borroso: 400×240 estirado 2.4×/2.27× con `GL_LINEAR`.
+
+**Fixes:**
+1. `main.c`: `eglSwapInterval(1)` + `frame_pace()` (cap 30 FPS por deadline, 33367 µs = 2 vblanks): un frame
+   lento cuesta 1 vblank, no 2, y los siguientes recuperan el promedio.
+2. `main.c`: se drenan todos los eventos clet pendientes por frame; stick izquierdo → D-pad (deadzone 64).
+3. Hilo principal fijado al core 0, mezclador de audio (Tremor) al core 1.
+4. `dynlib.c`: `memcpy/memset/memmove` del `.so` → `sceClib*` (mismo patrón que gtasa_vita).
+5. `dynlib.c` (`ENABLE_SHARP_SCALING`, ON): la textura RGB565 del compositor se guarda a 2× (nearest, NEON);
+   mismas UVs normalizadas, así que el quad del motor no cambia y el bilineal final es solo ~1.2× ("sharp
+   bilinear"). Costo estimado ~3 ms/frame (copy-on-write de vitaGL sobre 1024×1024).
+6. Build: el `libvitaGL.a` del SDK (sep 2026) trae C++ → se linkea `stdc++`, y los stubs `__cxa_*` locales
+   pasaron a `static *_stub` para no chocar con los reales (mismo comportamiento no-op).
+
+**Pendiente (consola):** FPS estable en combate, input/stick, imagen nítida sin artefactos ni colores raros.
+"Glitches" de la review sin detalle concreto — pedir captura/escena para investigar.
+
+### 20.1 — Pantalla negra desde el menú (`logs/log_1793915751.txt`) → vitaGL vendorizado (2026-11-05)
+
+Logo/título OK (overlays propios), negro desde `ui_status=2`, sin ningún `[GL] ... ERROR`. Mismo síntoma que
+Zenonia3/4-vita con el `libvitaGL.a` prebuilt del SDK (actualizado 2026-09-03): no está compilado con
+`SOFTFP_ABI=1` (`-DHAVE_SOFTFP_ABI`). **Fix (copiado de Zenonia3-vita, confirmado allá en consola):**
+`lib/vitagl` + `lib/vitashark` vendorizados, compilados por CMake con `SOFTFP_ABI=1 NO_SPLASHSCREEN=1`, más
+`patches/vitagl-disable-system-app-mode.patch` (ya aplicado; `scripts/build_vitagl.sh` lo re-chequea en cada
+build). Nuevo `build.sh` (compila en `/tmp/zenonia2-{src,build}`, el Makefile de vitaGL no tolera espacios en
+la ruta; `psvita-toolkit build` lo usa automáticamente).
+
+Logs: ahora `ux0:data/zenonia-2/logs/NNN.log` incrementales (001-999, máximo existente + 1, vuelve a 001
+tras 999) en vez de `log_<timestamp>.txt`.
+
+**Pendiente:** confirmar en consola que el menú/juego se ven. Si sigue negro, probar
+`./build.sh -DENABLE_SHARP_SCALING=OFF` para descartar la textura 2× de la Fase 20.
+
+### 20.2 — `logs/001.log`: 20 FPS → se revierte el pacer de la Fase 20 (2026-11-05)
+
+Pantalla OK con vitaGL vendorizado, pero 20 FPS. Causa: `frame_pace()` (sleep hasta deadline propio) +
+`eglSwapInterval(1)` que bloquea hasta el próximo vblank — sin alineación de fase, la mayoría de los frames
+duraban 3 vblanks (50 ms). **Fix:** vuelve `eglSwapInterval(2)` (30 FPS ya confirmado en Fase 19), se elimina
+`frame_pace()`. Para bajar el costo por frame y no pasar de 33 ms en combate: vitaGL con `NO_DEBUG=1
+TEXTURES_SPEEDHACK=1` (sin copy-on-write de la textura 1024×1024 entera en cada `glTexSubImage2D`).
+Telemetría nueva en la línea `frame N alive` (cada 120 frames): `fps`, `render_avg`/`render_max` de
+`NativeRender` en ms — el próximo log dice si el cuello es el motor (render ≥33 ms) o el loader.
+
+### 20.3 — 30 FPS confirmados (`logs/002.log`) + L+R para controles táctiles + remapeo estilo Carnivores (2026-11-05)
+
+`002.log`: `fps=30.0` sostenido, `render_avg` 15–23 ms, `render_max` puntual hasta 41 ms; sin errores
+gráficos reportados. **Fase 20.2 confirmada.**
+
+Nuevo:
+- **L+R** muestra/oculta el D-pad y los botones táctiles en tiempo de ejecución (antes solo por
+  `ENABLE_VIRTUAL_BUTTONS` al compilar, que ahora define solo el estado inicial). `set_virtual_buttons_visible()`
+  (`main.c`) alterna el primer halfword de `drawDpad`/`drawButton` entre `push {r4-r7,lr}` y `bx lr`
+  (+ `kuKernelFlushCaches`), los flags `SetShow*` del motor y las zonas táctiles del loader.
+- **`loader/controls.c`**: 9 acciones (HAL keycodes) remapeables, cada una a uno o más botones; panel trasero
+  por cuadrantes (L2/R2 arriba, L3/R3 abajo — internamente bits L1/R1/L3/R3 del pad, que la Vita no reporta;
+  `SCE_CTRL_L2/R2` son alias de los gatillos). **Start+Select** abre el menú (pausa el juego: no se llama a
+  `NativeRender`): X reemplaza, □ agrega, △ desasigna, O guarda y cierra; incluye toggle de controles táctiles y
+  "Restore defaults". Persistencia en `ux0:data/zenonia-2/controls.txt` (`ACCION = BTN, BTN`, editable). Texto
+  con la fuente 8×8 de `debugScreen` en una textura 480×272 dibujada con `splash_draw`.
+- Se quitó la salida de emergencia Start+Select (ahora abre el menú; se sale con el botón PS).
+- Los botones que siguen apretados tras el combo L+R o al cerrar el menú no llegan al juego hasta soltarse.
+
+**Pendiente (consola):** L+R alterna el overlay sin crash, menú legible, remapeo y `controls.txt` persisten.
+Después: release con todos los cambios de la Fase 20.
+
+### 20.4 — Modo de FPS: 30 o ORIGINAL (Select+R) (2026-11-05)
+
+`SetSpeed` no es fijo: `CMvOptionSaveData::Apply` (out_ghidra.c:157311) hace `fps = opcion_velocidad*4 + 10`
+→ la opción de velocidad del menú del juego da **10/14/18/22 FPS**; además `EvAppStart` pide 21, el logo 15 y
+`SaveCurrentGameData` 4 mientras guarda. Los logs viejos tenían la opción al máximo (22); `001/002.log` la tienen
+al mínimo (10). El motor también guarda `1000/fps` en `CGsApp+0xc4`.
+
+Nuevo `set_fps_mode()` (`main.c`): **30** = `eglSwapInterval(2)` (confirmado, 20.2) / **ORIGINAL** = respeta
+`g_engine_fps` (`java.c`) con período `1000/fps` ms como `NexusGLThread`, pacer por deadline sobre interval 1
+(a ≤22 FPS hay ≥10 ms de margen para la espera de vblank, a diferencia de 30). Alterna con **Select+R** o la fila
+"Frame rate" del menú Start+Select; se guarda en `controls.txt` (`FPS = 30|ORIGINAL`). Default: 30.
+
+**Pendiente (consola):** en ORIGINAL con la opción de velocidad al máximo, `fps≈22` en la línea `alive`.
+
 ## Backlog — Ideas para más adelante (NO implementar hasta confirmar que no quedan más bugs)
 
 ### B.1 — Mejorar nitidez/resolución gráfica: shader de post-proceso, no reemplazo de assets (2026-07-11)
