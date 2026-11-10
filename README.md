@@ -93,8 +93,21 @@ Controls
 |      ![squar]       | Map                                     |
 |      ![trian]       | Quick Slot / Skip                       |
 |      ![trigl]       | Save                                    |
-| ![start] + ![selec] | Exit Game                               |
+| ![start] + ![selec] | Controls / settings menu (game pauses)  |
+| ![trigl] + ![trigr] | Show / hide touch controls              |
+| ![selec] + ![trigr] | Frame rate: 30 FPS / ORIGINAL           |
 |     Front Touch     | UI Navigation / Touch                   |
+
+Use the PS button to exit the game.
+
+### Text language
+
+The Start+Select menu has a **Text language** row (ENGLISH / ESPANOL / PORTUGUES)
+that switches menus, items, skills, quests and popups **instantly, without
+restarting**. It needs a translation pack installed in
+`ux0:data/zenonia-2/assets/data/spa/` and `.../por/` (distributed separately;
+`data/eng/` is never modified). Missing files fall back to English. Story
+dialogue stays in English.
 
 FAQ
 ----------------

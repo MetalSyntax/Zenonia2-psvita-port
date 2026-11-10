@@ -71,6 +71,7 @@ lib/vitashark/libvitashark.a
 !lib/vitagl/Makefile
 !lib/vitashark/Makefile
 !scripts/build_vitagl.sh
+!scripts/zt1_lang.py
 
 # local-only: duplicate vitaGL clone (build uses lib/vitagl), clangd db
 /vitaGL/

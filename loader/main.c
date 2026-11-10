@@ -309,6 +309,142 @@ static void apply_so_patches(so_module *mod) {
 }
 
 /**
+ * @brief Swaps the UI strings hardcoded in the .so (menus, inventory, stats)
+ *        using data/<lang>/libstrings.txt ("vaddr\tslot\ten\ttr" per line,
+ *        written by scripts/zt1_lang.py): en->tr, or tr->en when @p revert.
+ *        A line is applied only if the expected text and its NUL padding up
+ *        to the slot are found intact, so a different .so build or a stale
+ *        file can't corrupt memory.
+ */
+static void lang_so_strings(const char *dir, int revert) {
+  uintptr_t base = zenonia2_mod.text_base;
+  char path[128], line[512], buf[256];
+  snprintf(path, sizeof(path), "ux0:data/zenonia-2/assets/data/%s/libstrings.txt", dir);
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    game_log("[LANG] %s no encontrado, menus en ingles\n", path);
+    return;
+  }
+  int ok = 0, bad = 0;
+  while (fgets(line, sizeof(line), f)) {
+    char *a = strtok(line, "\t"), *c = strtok(NULL, "\t");
+    char *en = strtok(NULL, "\t"), *tr = strtok(NULL, "\r\n");
+    if (!tr)
+      continue;
+    if (revert) {
+      char *t = en;
+      en = tr;
+      tr = t;
+    }
+    uintptr_t off = strtoul(a, NULL, 16);
+    size_t cap = strtoul(c, NULL, 10), le = strlen(en), lt = strlen(tr);
+    char *p = (char *)(base + off);
+    // .rodata starts at 0xe24d8, .data ends at 0x101b2c (md5 cae9d5fe...)
+    int match = off >= 0xe24d8 && off + cap < 0x101b2c && cap < sizeof(buf) &&
+                lt <= cap && le <= cap && memcmp(p, en, le + 1) == 0;
+    for (size_t i = le + 1; match && i <= cap; i++)
+      match = p[i] == 0;
+    if (!match) {
+      bad++;
+      continue;
+    }
+    memset(buf, 0, cap + 1);
+    memcpy(buf, tr, lt);
+    kuKernelCpuUnrestrictedMemcpy(p, buf, cap + 1);
+    ok++;
+  }
+  fclose(f);
+  game_log("[LANG] %s%s: %d textos del .so, %d omitidos\n", revert ? "-" : "+",
+           dir, ok, bad);
+}
+
+/**
+ * @brief Overwrites the loaded Xls* tables in place with the @p dir version
+ *        (NULL = English). GXL tables are fixed-width rows and the translated
+ *        files only differ in text bytes, so the size and header match and
+ *        pointers into the old buffer stay valid. The engine never writes them
+ *        (GVXLLoader::SetVal has no callers).
+ */
+static void lang_reload_xls(const char *dir) {
+  static const char *names[] = {"XlsChar", "XlsChargeItem", "XlsItem",
+                                "XlsMap",  "XlsNPC",        "XlsPCNew",
+                                "XlsQUEST", "XlsSetItem",   "XlsSkill"};
+  uintptr_t single = so_symbol(&zenonia2_mod, "_ZN12CGsSingletonI9CMvXlsMgrE13ms_pSingletonE");
+  int (*unz)(void *, unsigned long *, const void *, unsigned long) =
+      (void *)so_symbol(&zenonia2_mod, "uncompress");
+  uint8_t *mgr = single ? *(uint8_t **)single : NULL;
+  if (!mgr || !unz)
+    return; // before NativeInit: tables load from the right dir anyway
+  int count = *(int *)(mgr + 4), ok = 0;
+  uint8_t **tbls = *(uint8_t ***)(mgr + 8);
+  for (int n = 0; n < (int)(sizeof(names) / sizeof(names[0])); n++) {
+    char path[128];
+    snprintf(path, sizeof(path), "ux0:data/zenonia-2/assets/data/%s/%s.zt1",
+             dir ? dir : "eng", names[n]);
+    FILE *f = fopen(path, "rb");
+    uint32_t hdr[2]; // zt1: file size, decompressed size, zlib stream
+    if (!f || fread(hdr, 4, 2, f) != 2 || hdr[0] <= 8 || hdr[1] > (1 << 22)) {
+      if (f)
+        fclose(f);
+      continue;
+    }
+    unsigned long zlen = hdr[0] - 8, ulen = hdr[1];
+    uint8_t *z = malloc(zlen), *u = malloc(ulen);
+    if (z && u && fread(z, 1, zlen, f) == zlen && unz(u, &ulen, z, zlen) == 0) {
+      uint16_t cols = *(uint16_t *)(u + 6);
+      // Unique loaded table with the same GXL header + column types and size
+      uint8_t *dst = NULL;
+      int hits = 0;
+      for (int i = 0; i < count; i++) {
+        uint8_t *t = tbls[i], *buf = t ? *(uint8_t **)t : NULL;
+        if (!buf)
+          continue;
+        size_t sz = *(uint16_t *)(t + 0xc) + 10 +
+                    (size_t)*(uint16_t *)(t + 8) * *(uint16_t *)(t + 0xa);
+        if (sz == ulen && memcmp(buf, u, 10 + cols) == 0) {
+          dst = buf;
+          hits++;
+        }
+      }
+      if (hits == 1) {
+        memcpy(dst, u, ulen);
+        ok++;
+      } else
+        game_log("[LANG] %s: %d tablas coinciden, no se recarga\n", names[n], hits);
+    }
+    free(z);
+    free(u);
+    fclose(f);
+  }
+  game_log("[LANG] %d tablas Xls recargadas\n", ok);
+}
+
+/**
+ * @brief Switches the text language (data/ subdir, NULL = English) at boot or
+ *        live from the Start+Select menu: .so strings, Xls tables in place,
+ *        and Str tables closed so CMvStrMgr::GetTbl lazily reopens them from
+ *        the new dir (java.c reads controls_lang_dir()) — the engine itself
+ *        calls CloseTblAll on every script load, so callers already cope.
+ * @note ponytail: strings the engine copied into its own buffers (e.g. a
+ *       window already open) keep the old language until rebuilt.
+ */
+void set_text_language(const char *old, const char *dir) {
+  if (old)
+    lang_so_strings(old, 1);
+  if (dir)
+    lang_so_strings(dir, 0);
+  if (old == dir)
+    return; // same language (or English boot): nothing to reload
+  lang_reload_xls(dir);
+  uintptr_t single = so_symbol(&zenonia2_mod, "_ZN12CGsSingletonI9CMvStrMgrE13ms_pSingletonE");
+  void (*close_all)(void *) =
+      (void *)so_symbol(&zenonia2_mod, "_ZN9CMvStrMgr11CloseTblAllEv");
+  if (single && *(void **)single && close_all)
+    close_all(*(void **)single);
+  game_log("[LANG] idioma: %s\n", dir ? dir : "eng");
+}
+
+/**
  * @brief UI status published by java.c: 0 = logo, 1 = title, 2 = menu,
  *        >=3 = in-game. Drives which splash overlay (if any) main() draws
  *        on top of the engine's own output each frame.
@@ -603,6 +739,8 @@ int main() {
         (void *)handleCletEvent, (void *)SetShowDirectionButton,
         (void *)SetShowSelectButton);
 
+    controls_init(); // before NativeInit: LANG must be known before any data/eng read
+    set_text_language(NULL, controls_lang_dir());
     // Ejecutar la secuencia de inicio de Android
     game_log("Llamando JNI_OnLoad...\n");
     if (Game_JNI_OnLoad)
@@ -633,7 +771,6 @@ int main() {
                              SCE_TOUCH_SAMPLING_STATE_START);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
     sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
-    controls_init();
 
     SceCtrlData pad;
     SceTouchData touch;

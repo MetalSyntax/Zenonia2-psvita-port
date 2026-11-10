@@ -1101,6 +1101,52 @@ Nuevo `set_fps_mode()` (`main.c`): **30** = `eglSwapInterval(2)` (confirmado, 20
 
 **Pendiente (consola):** en ORIGINAL con la opción de velocidad al máximo, `fps≈22` en la línea `alive`.
 
+## Fase 21: traducción ES/PT del texto (`data/<lang>/*.zt1`) — 2026-11-10
+
+**Por qué crasheaba el intento anterior** (archivos ES copiados sobre `data/eng/`), tres bugs en los
+scripts `scripts/pack_*.py`, confirmados contra los originales del APK y `GxUncompressZT1`:
+1. **Header `.zt1` invertido.** El original es `u32 tamaño_archivo, u32 tamaño_descomprimido`; los scripts
+   escribían `(descomprimido, comprimido)`. El motor hace `MC_knlCalloc(field1)` y `uncompress` en ese
+   buffer → buffer chico → `Z_BUF_ERROR` → `GxUncompressZT1` devuelve NULL → crash.
+2. **GST (`Str*`) corrido un índice.** La tabla son `n+1` offsets u16 desde el byte 6 (inicios + fin), sin
+   terminador implícito; `pack_gst.py` insertaba un offset extra → cada string mostraba el anterior.
+3. **GXL (`Xls*`) con columnas adivinadas.** El extractor tomaba cualquier corrida imprimible como texto y
+   "tradujo" bytes numéricos (p.ej. XlsSkill `'<\x0bd'`→`'< r'`, prefijos de XlsQUEST/XlsMap), pisando
+   stats. Además, la fuente es ASCII + EUC-KR: los acentos UTF-8 se leen como coreano doble-byte.
+
+**Solución:** `scripts/zt1_lang.py` (único script; `test` verifica repack idéntico de los 48 originales).
+Columnas de texto GXL fijadas a mano, límite de bytes por columna medido, texto plegado a ASCII, tokens
+`!cRRGGBB`/`!N`/`!C`/`%s`/`%d` validados (si difieren se deja el inglés). Salida en
+`ux0_data/zenonia-2/assets/data/{spa,por}/`; `data/eng/` queda original. Loader: `LANG = EN|ES|PT` en
+`controls.txt` / fila "Text language" del menú Start+Select (aplica al reiniciar); `java.c` sirve
+`data/eng/X` desde `data/<lang>/X` si existe (fallback a inglés). `controls_init()` se movió antes de
+`NativeInit`. Coreano (`kor/`) no se toca. **No cubierto:** diálogos `script/eng/**` (bytecode con offsets,
+formato sin documentar). Pendiente: probar en consola.
+
+**21.1 — Menús hardcodeados en el `.so`.** Menú principal (Continue/New Game), pausa (Save/Option/Help),
+inventario, stats y opciones no salen de `data/`: son ~280 strings en `.rodata`/`.data` de
+`libzenonia2.so`. `zt1_lang.py` los extrae (plantilla `_libzenonia2.json`, capacidad = tamaño real del
+slot: arrays `char[N]` detectados por paso fijo, literales sueltos hasta su alineación a 4) y genera
+`data/<lang>/libstrings.txt`; `apply_lang_strings()` (`main.c`, justo después de `controls_init()`) los
+escribe en memoria sólo si el inglés y su relleno de NULs están intactos. Se excluyen nombres de
+recursos buscados por string (0xed49c–0xed6c0), rutas y códigos. Las traducciones que no entran en su
+slot se descartan (nunca se truncan: muchas son formatos de printf). Riesgo conocido: si el linker
+compartió la cola de un literal (sufijo de otro), traducir el largo cambiaría también el corto.
+
+**21.2 — Cambio de idioma en caliente (sin reiniciar).** `set_text_language(old, new)` (`main.c`), llamado
+al arrancar y desde la fila "Text language" del menú Start+Select:
+- **Strings del `.so`:** revierte `old` (tr→en, misma verificación de texto+relleno) y aplica `new`.
+- **Tablas `Xls*`:** `GVXLLoader` son filas de ancho fijo (`cols+10+bpl*filas`) y las traducidas sólo cambian
+  bytes de texto → se descomprimen (con el `uncompress` del propio `.so`) y se copian **sobre el mismo buffer**
+  si header+tipos de columna+tamaño coinciden con exactamente una tabla cargada (verificado offline: las 9
+  de ES y PT coinciden únicamente con su original). Los punteros existentes siguen válidos; el motor nunca
+  escribe esas tablas (`GVXLLoader::SetVal` sin llamadas).
+- **Tablas `Str*`:** `CMvStrMgr::CloseTblAll`; `GetTbl` las reabre perezosamente desde el dir nuevo
+  (`controls_lang_dir()` ya no queda fijo al de arranque). El motor mismo llama `CloseTblAll` en cada
+  `CreateScript`, así que los llamadores ya toleran el cierre.
+Límite: textos que el motor ya copió a buffers propios (una ventana abierta) quedan en el idioma anterior
+hasta que se reconstruyen. **Confirmado en consola (2026-11-10)**; publicado en v1.4.0.
+
 ## Backlog — Ideas para más adelante (NO implementar hasta confirmar que no quedan más bugs)
 
 ### B.1 — Mejorar nitidez/resolución gráfica: shader de post-proceso, no reemplazo de assets (2026-07-11)

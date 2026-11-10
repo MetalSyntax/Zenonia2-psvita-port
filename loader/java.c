@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 
 #include "audio.h"
+#include "controls.h"
 
 extern void game_log(const char *fmt, ...);
 
@@ -34,6 +35,13 @@ extern void game_log(const char *fmt, ...);
  * @note Ver docs/loader/java.md#zenonia_resolve_asset_path-línea-24 para el razonamiento de diseño.
  */
 static int zenonia_resolve_asset_path(const char *name, char *out, size_t out_size) {
+    // Translated text tables; missing files fall through to English.
+    const char *lang = controls_lang_dir();
+    if (lang && strncmp(name, "data/eng/", 9) == 0) {
+        snprintf(out, out_size, "ux0:data/zenonia-2/assets/data/%s/%s", lang, name + 9);
+        if (access(out, F_OK) == 0) return 1;
+    }
+
     snprintf(out, out_size, "ux0:data/zenonia-2/%s", name);
     if (access(out, F_OK) == 0) return 1;
 

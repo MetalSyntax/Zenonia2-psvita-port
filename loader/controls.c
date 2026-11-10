@@ -20,6 +20,7 @@ extern void game_log(const char *fmt, ...);
 extern PsvDebugScreenFont psvDebugScreenFont;
 extern void set_virtual_buttons_visible(int visible); // main.c
 extern void set_fps_mode(int original);               // main.c
+extern void set_text_language(const char *old, const char *dir); // main.c
 extern volatile int g_engine_fps;                     // java.c
 
 #define CONTROLS_PATH "ux0:data/zenonia-2/controls.txt"
@@ -70,6 +71,14 @@ static uint32_t binding[ACT_COUNT];
 volatile int g_vbuttons_visible = 0;
 int g_fps_original = 0;
 
+// Extra text languages: data/eng/*.zt1 is served from data/<dir>/ (see java.c).
+static const struct { const char *key, *label, *dir; } langs[] = {
+    {"EN", "ENGLISH", NULL}, {"ES", "ESPANOL", "spa"}, {"PT", "PORTUGUES", "por"},
+};
+#define LANG_COUNT (int)(sizeof(langs) / sizeof(langs[0]))
+static int lang = 0;
+const char *controls_lang_dir(void) { return langs[lang].dir; }
+
 uint32_t controls_binding(int a) { return binding[a]; }
 int controls_action_hal(int a) { return actions[a].hal; }
 
@@ -93,6 +102,7 @@ void controls_save(void) {
     fprintf(f, "%s\n", any ? "" : " NONE");
   }
   fprintf(f, "FPS = %s\n", g_fps_original ? "ORIGINAL" : "30");
+  fprintf(f, "LANG = %s\n", langs[lang].key);
   fclose(f);
 }
 
@@ -118,6 +128,11 @@ void controls_init(void) {
     char *key = trim(line);
     if (!strcasecmp(key, "FPS")) {
       g_fps_original = !strcasecmp(trim(eq + 1), "ORIGINAL");
+      continue;
+    }
+    if (!strcasecmp(key, "LANG")) {
+      for (int l = 0; l < LANG_COUNT; l++)
+        if (!strcasecmp(trim(eq + 1), langs[l].key)) lang = l;
       continue;
     }
     int a;
@@ -158,7 +173,7 @@ uint32_t controls_read(const SceCtrlData *pad) {
 
 /* ------------------------------ menu ------------------------------ */
 
-enum { ROW_VBUTTONS = ACT_COUNT, ROW_FPS, ROW_DEFAULTS, ROW_COUNT };
+enum { ROW_VBUTTONS = ACT_COUNT, ROW_FPS, ROW_LANG, ROW_DEFAULTS, ROW_COUNT };
 enum { CAP_NONE, CAP_REPLACE, CAP_ADD };
 
 static int menu_open = 0, cursor = 0, capture = CAP_NONE, dirty = 1;
@@ -207,7 +222,11 @@ int controls_menu_update(uint32_t held, uint32_t pressed) {
       set_virtual_buttons_visible(!g_vbuttons_visible);
     else if (cursor == ROW_FPS)
       set_fps_mode(!g_fps_original);
-    else
+    else if (cursor == ROW_LANG) {
+      int old = lang;
+      lang = (lang + 1) % LANG_COUNT;
+      set_text_language(langs[old].dir, langs[lang].dir);
+    } else
       set_defaults();
   }
   return 0;
@@ -274,6 +293,9 @@ static void render(void) {
       else
         strcpy(val, "30 FPS");
       text(232, y, C_TEXT, val);
+    } else if (r == ROW_LANG) {
+      text(16, y, C_TEXT, "Text language");
+      text(232, y, C_TEXT, langs[lang].label);
     } else {
       text(16, y, C_TEXT, "Restore defaults");
     }

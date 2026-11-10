@@ -25,6 +25,8 @@ void controls_save(void);                  /**< write controls.txt */
 uint32_t controls_read(const SceCtrlData *pad); /**< buttons + stick + rear touch */
 uint32_t controls_binding(int action);     /**< SCE_CTRL_* mask bound to action */
 int controls_action_hal(int action);       /**< HAL keycode of action */
+/** data/ subdir replacing data/eng/ ("spa"/"por"), NULL = English. */
+const char *controls_lang_dir(void);
 
 int controls_menu_active(void);
 void controls_menu_open(void);
